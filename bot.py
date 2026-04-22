@@ -19,6 +19,12 @@ ADMIN_ID = 416065237
 FREE_LIMIT = 5
 MAX_HISTORY = 10
 
+PLANS = {
+    "basic":    {"name": "Базовый",   "price": "299 руб./мес.",  "requests": 200,  "file_mb_total": 50,  "file_mb_single": 10},
+    "standard": {"name": "Стандарт",  "price": "599 руб./мес.",  "requests": 500,  "file_mb_total": 150, "file_mb_single": 10},
+    "pro":      {"name": "Про",       "price": "999 руб./мес.",  "requests": 99999,"file_mb_total": 500, "file_mb_single": 25},
+}
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 ai = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -27,18 +33,9 @@ conversations = {}
 user_roles = {}
 
 ROLES = {
-    "business": {
-        "name": "🧑‍💼 Бизнес-ассистент",
-        "prompt": "Ты профессиональный бизнес-ассистент. Помогаешь с анализом данных, составлением документов, деловой перепиской, стратегическими решениями и бизнес-задачами. Отвечай чётко, структурированно и профессионально."
-    },
-    "copywriter": {
-        "name": "✍️ Копирайтер",
-        "prompt": "Ты опытный копирайтер. Помогаешь писать тексты для соцсетей, рекламу, статьи, посты, описания товаров и услуг. Пиши живо, убедительно и цепляюще."
-    },
-    "chat": {
-        "name": "💬 Обычный чат",
-        "prompt": "Ты дружелюбный и умный собеседник. Отвечай естественно, помогай с любыми вопросами, будь полезным и приятным в общении."
-    }
+    "business":   {"name": "🧑‍💼 Бизнес-ассистент", "prompt": "Ты профессиональный бизнес-ассистент. Помогаешь с анализом данных, составлением документов, деловой перепиской, стратегическими решениями и бизнес-задачами. Отвечай чётко, структурированно и профессионально."},
+    "copywriter": {"name": "✍️ Копирайтер",          "prompt": "Ты опытный копирайтер. Помогаешь писать тексты для соцсетей, рекламу, статьи, посты, описания товаров и услуг. Пиши живо, убедительно и цепляюще."},
+    "chat":       {"name": "💬 Обычный чат",          "prompt": "Ты дружелюбный и умный собеседник. Отвечай естественно, помогай с любыми вопросами, будь полезным и приятным в общении."},
 }
 
 WELCOME_TEXT = """👋 Привет! Я твой ИИ-помощник на базе Claude.
@@ -52,8 +49,8 @@ WELCOME_TEXT = """👋 Привет! Я твой ИИ-помощник на ба
 - 🧑‍💼 Помогать с бизнес-задачами
 
 📋 Команды:
-/profile — твой профиль и статус подписки
-/role — выбрать режим работы бота
+/profile — профиль и статус подписки
+/role — выбрать режим работы
 /clear — очистить историю диалога
 /help — как пользоваться ботом
 /subscribe — оформить подписку
@@ -64,10 +61,10 @@ WELCOME_TEXT = """👋 Привет! Я твой ИИ-помощник на ба
 HELP_TEXT = """📖 Как пользоваться ботом
 
 ✏️ Текстовые запросы
-Просто напиши свой вопрос — бот ответит. Можно задавать уточняющие вопросы, бот помнит контекст последних {history} сообщений.
+Напиши свой вопрос — бот ответит. Можно задавать уточняющие вопросы, бот помнит контекст последних {history} сообщений.
 
 📎 Файлы и фото
-Отправь файл или фото с подписью или без. Бот умеет читать:
+Отправь файл или фото. Бот умеет читать:
 — Фотографии (JPG, PNG)
 — Документы PDF
 — Word файлы (.docx)
@@ -75,16 +72,17 @@ HELP_TEXT = """📖 Как пользоваться ботом
 — Текстовые файлы (.txt)
 
 🎭 Режимы работы (/role)
-Выбери роль под свою задачу:
 — 🧑‍💼 Бизнес-ассистент — деловые задачи, анализ, документы
 — ✍️ Копирайтер — тексты, посты, реклама
 — 💬 Обычный чат — общение и помощь по любым вопросам
 
 🗑 Очистка контекста (/clear)
-Бот помнит последние {history} сообщений диалога. Если хочешь начать новую тему с чистого листа — используй /clear. Это полезно когда предыдущий контекст мешает новому разговору.
+Бот помнит последние {history} сообщений. Используй /clear чтобы начать новую тему с чистого листа.
 
-💰 Подписка (/subscribe)
-Бесплатно доступно {limit} запросов. Для безлимитного доступа оформи подписку — 299 руб./мес."""
+💰 Тарифы (/subscribe):
+— Базовый: 299 руб./мес. — 200 запросов + 50 МБ файлов
+— Стандарт: 599 руб./мес. — 500 запросов + 150 МБ файлов
+— Про: 999 руб./мес. — безлимит запросов + 500 МБ файлов"""
 
 async def init_db():
     global db
@@ -96,28 +94,83 @@ async def init_db():
             free_used INTEGER DEFAULT 0,
             is_paid BOOLEAN DEFAULT FALSE,
             total_requests INTEGER DEFAULT 0,
-            subscription_until TIMESTAMP
+            subscription_until TIMESTAMP,
+            plan TEXT DEFAULT 'free',
+            requests_used INTEGER DEFAULT 0,
+            file_mb_used FLOAT DEFAULT 0,
+            period_start TIMESTAMP
         )
     """)
-    await db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS total_requests INTEGER DEFAULT 0")
-    await db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_until TIMESTAMP")
+    for col, defval in [
+        ("total_requests", "0"), ("subscription_until", "NULL"),
+        ("plan", "'free'"), ("requests_used", "0"),
+        ("file_mb_used", "0"), ("period_start", "NULL")
+    ]:
+        try:
+            await db.execute(f"ALTER TABLE users ADD COLUMN {col} {'TEXT' if col == 'plan' else 'TIMESTAMP' if 'until' in col or 'start' in col else 'FLOAT' if 'mb' in col else 'INTEGER'} DEFAULT {defval}")
+        except:
+            pass
 
 async def get_user(user_id, username):
-    row = await db.fetchrow("SELECT free_used, is_paid, subscription_until FROM users WHERE user_id = $1", user_id)
+    row = await db.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
     if not row:
         await db.execute("INSERT INTO users (user_id, username) VALUES ($1, $2)", user_id, username)
-        return 0, False, None
+        return await db.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
+    # Проверяем истечение подписки
     if row["is_paid"] and row["subscription_until"] and row["subscription_until"] < datetime.utcnow():
-        await db.execute("UPDATE users SET is_paid = FALSE WHERE user_id = $1", user_id)
+        await db.execute("UPDATE users SET is_paid = FALSE, plan = 'free', requests_used = 0, file_mb_used = 0 WHERE user_id = $1", user_id)
         await bot.send_message(user_id, "⚠️ Ваша подписка истекла. Напишите /subscribe чтобы продлить.")
-        return row["free_used"], False, row["subscription_until"]
-    return row["free_used"], row["is_paid"], row["subscription_until"]
+        return await db.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
+    # Сбрасываем счётчики если новый период
+    if row["is_paid"] and row["period_start"]:
+        period_end = row["period_start"] + timedelta(days=30)
+        if datetime.utcnow() > period_end:
+            await db.execute("UPDATE users SET requests_used = 0, file_mb_used = 0, period_start = $1 WHERE user_id = $2", datetime.utcnow(), user_id)
+            return await db.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
+    return row
 
-async def increment_usage(user_id):
-    await db.execute("""
-        UPDATE users SET free_used = free_used + 1, total_requests = total_requests + 1
-        WHERE user_id = $1
-    """, user_id)
+async def check_limits(user_id, username, file_mb=0):
+    """Проверяет лимиты. Возвращает (allowed, error_message)"""
+    if user_id == ADMIN_ID:
+        return True, None
+    row = await get_user(user_id, username)
+    plan_key = row["plan"] or "free"
+
+    if not row["is_paid"]:
+        if row["free_used"] >= FREE_LIMIT:
+            return False, "Бесплатные запросы закончились.\nНапиши /subscribe чтобы оформить подписку."
+        return True, None
+
+    plan = PLANS.get(plan_key, PLANS["basic"])
+
+    if row["requests_used"] >= plan["requests"]:
+        return False, f"Лимит запросов на этот месяц исчерпан ({plan['requests']} запросов).\nНапиши /subscribe для смены тарифа."
+
+    if file_mb > 0:
+        if file_mb > plan["file_mb_single"]:
+            return False, f"Файл слишком большой. Максимальный размер для вашего тарифа: {plan['file_mb_single']} МБ."
+        if (row["file_mb_used"] or 0) + file_mb > plan["file_mb_total"]:
+            used = round(row["file_mb_used"] or 0, 1)
+            return False, f"Превышен месячный лимит файлов. Использовано: {used} МБ из {plan['file_mb_total']} МБ."
+
+    return True, None
+
+async def increment_usage(user_id, file_mb=0):
+    row = await db.fetchrow("SELECT is_paid, free_used FROM users WHERE user_id = $1", user_id)
+    if not row["is_paid"]:
+        await db.execute("UPDATE users SET free_used = free_used + 1, total_requests = total_requests + 1 WHERE user_id = $1", user_id)
+    else:
+        await db.execute("""
+            UPDATE users SET
+                requests_used = requests_used + 1,
+                total_requests = total_requests + 1,
+                file_mb_used = file_mb_used + $1
+            WHERE user_id = $2
+        """, file_mb, user_id)
+
+def get_system_prompt(user_id):
+    role_key = user_roles.get(user_id, "chat")
+    return ROLES[role_key]["prompt"]
 
 async def download_file(file_id):
     file = await bot.get_file(file_id)
@@ -126,23 +179,14 @@ async def download_file(file_id):
         async with session.get(url) as resp:
             return await resp.read()
 
-def get_system_prompt(user_id):
-    role_key = user_roles.get(user_id, "chat")
-    return ROLES[role_key]["prompt"]
-
 @dp.message(F.text == "/start")
 async def start(message: Message):
     conversations.pop(message.from_user.id, None)
-    await message.answer(
-        WELCOME_TEXT.format(limit=FREE_LIMIT),
-        reply_markup=ReplyKeyboardRemove()
-    )
+    await message.answer(WELCOME_TEXT.format(limit=FREE_LIMIT), reply_markup=ReplyKeyboardRemove())
 
 @dp.message(F.text == "/help")
 async def help_cmd(message: Message):
-    await message.answer(
-        HELP_TEXT.format(history=MAX_HISTORY, limit=FREE_LIMIT)
-    )
+    await message.answer(HELP_TEXT.format(history=MAX_HISTORY, limit=FREE_LIMIT))
 
 @dp.message(F.text == "/role")
 async def role_cmd(message: Message):
@@ -154,7 +198,7 @@ async def role_cmd(message: Message):
         builder.button(text=label, callback_data=f"role_{key}")
     builder.adjust(1)
     await message.answer(
-        "🎭 Выбери режим работы бота:\n\n"
+        "🎭 Выбери режим работы:\n\n"
         "🧑‍💼 Бизнес-ассистент — деловые задачи, анализ, документы\n"
         "✍️ Копирайтер — тексты, посты, реклама\n"
         "💬 Обычный чат — общение и помощь по любым вопросам",
@@ -169,66 +213,108 @@ async def set_role(callback: CallbackQuery):
         return
     user_roles[uid] = role_key
     conversations.pop(uid, None)
-    role_name = ROLES[role_key]["name"]
-    await callback.message.edit_text(
-        f"✅ Режим изменён на: {role_name}\n\nИстория диалога очищена. Можешь начинать!"
-    )
+    await callback.message.edit_text(f"✅ Режим изменён на: {ROLES[role_key]['name']}\n\nИстория диалога очищена. Можешь начинать!")
     await callback.answer()
 
 @dp.message(F.text.in_({"👤 Мой профиль", "/profile"}))
 async def profile(message: Message):
     uid = message.from_user.id
     username = message.from_user.username or "без username"
-    free_used, is_paid, sub_until = await get_user(uid, username)
-    role_key = user_roles.get(uid, "chat")
-    role_name = ROLES[role_key]["name"]
-    if is_paid and sub_until:
-        sub_text = f"✅ Активна до: {sub_until.strftime('%d.%m.%Y %H:%M')}"
-    elif sub_until and not is_paid:
-        sub_text = f"❌ Истекла: {sub_until.strftime('%d.%m.%Y %H:%M')}"
+    row = await get_user(uid, username)
+    role_name = ROLES.get(user_roles.get(uid, "chat"), ROLES["chat"])["name"]
+    plan_key = row["plan"] or "free"
+
+    if row["is_paid"] and row["subscription_until"]:
+        plan = PLANS.get(plan_key, PLANS["basic"])
+        req_limit = "∞" if plan["requests"] > 9999 else str(plan["requests"])
+        sub_text = (
+            f"✅ {plan['name']} — {plan['price']}\n"
+            f"📅 До: {row['subscription_until'].strftime('%d.%m.%Y %H:%M')}\n"
+            f"📨 Запросов: {row['requests_used']} / {req_limit}\n"
+            f"📁 Файлов: {round(row['file_mb_used'] or 0, 1)} / {plan['file_mb_total']} МБ"
+        )
+    elif row["subscription_until"] and not row["is_paid"]:
+        sub_text = f"❌ Истекла: {row['subscription_until'].strftime('%d.%m.%Y %H:%M')}"
     else:
-        sub_text = f"🆓 Бесплатный план ({FREE_LIMIT - min(free_used, FREE_LIMIT)} запросов осталось)"
+        sub_text = f"🆓 Бесплатный план ({FREE_LIMIT - min(row['free_used'], FREE_LIMIT)} запросов осталось)"
+
     await message.answer(
         f"👤 Профиль\n\n"
         f"🤖 Модель: Claude Sonnet\n"
         f"🎭 Режим: {role_name}\n"
         f"📋 Подписка: {sub_text}\n"
-        f"📨 Всего запросов: {free_used}"
+        f"📊 Всего запросов за всё время: {row['total_requests']}"
     )
 
 @dp.message(F.text == "/subscribe")
 async def subscribe(message: Message):
     uid = message.from_user.id
     username = message.from_user.username or "без username"
-    await message.answer("Заявка отправлена! Администратор свяжется с тобой.")
+    await message.answer(
+        "💰 Выбери тариф:\n\n"
+        "🔹 Базовый — 299 руб./мес.\n200 запросов + 50 МБ файлов\n\n"
+        "🔸 Стандарт — 599 руб./мес.\n500 запросов + 150 МБ файлов\n\n"
+        "💎 Про — 999 руб./мес.\nБезлимит запросов + 500 МБ файлов\n\n"
+        "Выбери тариф и отправь заявку — администратор свяжется с тобой."
+    )
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Одобрить (+1 месяц)", callback_data=f"approve_{uid}")
+    for key, plan in PLANS.items():
+        builder.button(text=f"Выбрать {plan['name']} — {plan['price']}", callback_data=f"req_{key}_{uid}")
+    builder.adjust(1)
+    await message.answer("👇 Выбери тариф:", reply_markup=builder.as_markup())
+
+@dp.callback_query(F.data.startswith("req_"))
+async def request_plan(callback: CallbackQuery):
+    parts = callback.data.split("_")
+    plan_key = parts[1]
+    uid = int(parts[2])
+    username = callback.from_user.username or "без username"
+    plan = PLANS.get(plan_key)
+    if not plan:
+        return
+    await callback.message.edit_text(f"✅ Заявка на тариф «{plan['name']}» отправлена!\nАдминистратор свяжется с тобой.")
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"✅ Одобрить «{plan['name']}»", callback_data=f"approve_{uid}_{plan_key}")
     builder.button(text="❌ Отклонить", callback_data=f"reject_{uid}")
+    builder.adjust(1)
     await bot.send_message(
         ADMIN_ID,
         f"💰 Новая заявка на подписку!\n"
         f"👤 @{username}\n"
-        f"🆔 ID: {uid}",
+        f"🆔 ID: {uid}\n"
+        f"📦 Тариф: {plan['name']} — {plan['price']}",
         reply_markup=builder.as_markup()
     )
+    await callback.answer()
 
 @dp.callback_query(F.data.startswith("approve_"))
 async def approve(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         return
-    uid = int(callback.data.split("_")[1])
+    parts = callback.data.split("_")
+    uid = int(parts[1])
+    plan_key = parts[2] if len(parts) > 2 else "basic"
+    plan = PLANS.get(plan_key, PLANS["basic"])
     row = await db.fetchrow("SELECT subscription_until, is_paid FROM users WHERE user_id = $1", uid)
     if row and row["is_paid"] and row["subscription_until"] and row["subscription_until"] > datetime.utcnow():
         new_until = row["subscription_until"] + timedelta(days=30)
     else:
         new_until = datetime.utcnow() + timedelta(days=30)
-    await db.execute("UPDATE users SET is_paid = TRUE, subscription_until = $1 WHERE user_id = $2", new_until, uid)
+    await db.execute("""
+        UPDATE users SET is_paid = TRUE, subscription_until = $1, plan = $2,
+        requests_used = 0, file_mb_used = 0, period_start = $3
+        WHERE user_id = $4
+    """, new_until, plan_key, datetime.utcnow(), uid)
     until_str = new_until.strftime('%d.%m.%Y %H:%M')
+    req_limit = "∞" if plan["requests"] > 9999 else str(plan["requests"])
     await bot.send_message(uid,
         f"✅ Подписка активирована!\n"
+        f"📦 Тариф: {plan['name']} — {plan['price']}\n"
+        f"📨 Запросов в месяц: {req_limit}\n"
+        f"📁 Файлов в месяц: {plan['file_mb_total']} МБ\n"
         f"📅 Действует до: {until_str}\n\n"
         f"Пользуйтесь без ограничений!")
-    await callback.message.edit_text(callback.message.text + f"\n\n✅ Одобрено до {until_str}")
+    await callback.message.edit_text(callback.message.text + f"\n\n✅ Одобрено: {plan['name']} до {until_str}")
     await callback.answer("Подписка активирована!")
 
 @dp.callback_query(F.data.startswith("reject_"))
@@ -246,13 +332,21 @@ async def stats(message: Message):
         return
     total_users = await db.fetchval("SELECT COUNT(*) FROM users")
     paid_users = await db.fetchval("SELECT COUNT(*) FROM users WHERE is_paid = TRUE")
+    basic = await db.fetchval("SELECT COUNT(*) FROM users WHERE plan = 'basic' AND is_paid = TRUE")
+    standard = await db.fetchval("SELECT COUNT(*) FROM users WHERE plan = 'standard' AND is_paid = TRUE")
+    pro = await db.fetchval("SELECT COUNT(*) FROM users WHERE plan = 'pro' AND is_paid = TRUE")
     total_requests = await db.fetchval("SELECT SUM(total_requests) FROM users")
     top_users = await db.fetch("SELECT username, total_requests FROM users ORDER BY total_requests DESC LIMIT 5")
     top_text = "\n".join([f"@{r['username']} — {r['total_requests']} запросов" for r in top_users])
+    revenue = (basic or 0) * 299 + (standard or 0) * 599 + (pro or 0) * 999
     await message.answer(
         f"📊 Статистика бота\n\n"
         f"👥 Всего пользователей: {total_users}\n"
         f"💰 Платных: {paid_users}\n"
+        f"  🔹 Базовый: {basic}\n"
+        f"  🔸 Стандарт: {standard}\n"
+        f"  💎 Про: {pro}\n"
+        f"💵 Выручка/мес.: ~{revenue} руб.\n"
         f"📨 Всего запросов: {total_requests or 0}\n\n"
         f"🏆 Топ-5 пользователей:\n{top_text}"
     )
@@ -260,30 +354,20 @@ async def stats(message: Message):
 @dp.message(F.text == "/clear")
 async def clear(message: Message):
     conversations.pop(message.from_user.id, None)
-    await message.answer(
-        "🗑 История диалога очищена!\n\n"
-        "Это полезно когда хочешь начать новую тему с чистого листа — предыдущий контекст больше не влияет на ответы бота."
-    )
+    await message.answer("🗑 История диалога очищена!\n\nЭто полезно когда хочешь начать новую тему с чистого листа.")
 
 @dp.message(F.text == "/support")
 async def support(message: Message):
-    await message.answer(
-        "🆘 Поддержка\n\n"
-        "Если у вас возникли вопросы или проблемы — напишите администратору:\n"
-        "@polyakovkonst"
-    )
+    await message.answer("🆘 Поддержка\n\nЕсли у вас возникли вопросы — напишите администратору:\n@polyakovkonst")
 
-async def handle_with_access(message: Message, content):
+async def handle_with_access(message: Message, content, file_mb=0):
     uid = message.from_user.id
     username = message.from_user.username or "без username"
-    free_used, is_paid, sub_until = await get_user(uid, username)
-    if uid != ADMIN_ID and not is_paid and free_used >= FREE_LIMIT:
-        await message.answer(
-            "Бесплатные запросы закончились.\n"
-            "Напиши /subscribe чтобы оформить подписку — 299 руб./мес."
-        )
+    allowed, error = await check_limits(uid, username, file_mb)
+    if not allowed:
+        await message.answer(error)
         return False
-    await increment_usage(uid)
+    await increment_usage(uid, file_mb)
     if uid not in conversations:
         conversations[uid] = []
     conversations[uid].append({"role": "user", "content": content})
@@ -297,21 +381,17 @@ async def handle_photo(message: Message):
     await bot.send_chat_action(message.chat.id, "typing")
     photo = message.photo[-1]
     file_data = await download_file(photo.file_id)
+    file_mb = len(file_data) / (1024 * 1024)
     b64 = base64.standard_b64encode(file_data).decode("utf-8")
     caption = message.caption or "Опиши что на этом изображении"
     content = [
         {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
         {"type": "text", "text": caption}
     ]
-    allowed = await handle_with_access(message, content)
+    allowed = await handle_with_access(message, content, file_mb)
     if not allowed:
         return
-    response = ai.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=1500,
-        system=get_system_prompt(uid),
-        messages=conversations[uid]
-    )
+    response = ai.messages.create(model="claude-sonnet-4-5", max_tokens=1500, system=get_system_prompt(uid), messages=conversations[uid])
     reply = response.content[0].text
     conversations[uid].append({"role": "assistant", "content": reply})
     reply = re.sub(r'\*\*?(.*?)\*\*?', r'\1', reply)
@@ -327,6 +407,7 @@ async def handle_document(message: Message):
     name = doc.file_name or ""
     caption = message.caption or "Проанализируй этот файл"
     file_data = await download_file(doc.file_id)
+    file_mb = len(file_data) / (1024 * 1024)
     if mime == "application/pdf":
         b64 = base64.standard_b64encode(file_data).decode("utf-8")
         content = [
@@ -343,12 +424,11 @@ async def handle_document(message: Message):
         try:
             if mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" or name.endswith(".docx"):
                 import io
-                from docx import Document
-                doc_obj = Document(io.BytesIO(file_data))
+                from docx import Document as DocxDoc
+                doc_obj = DocxDoc(io.BytesIO(file_data))
                 text = "\n".join([p.text for p in doc_obj.paragraphs])
             elif mime in ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-excel") or name.endswith((".xlsx", ".xls")):
-                import io
-                import openpyxl
+                import io, openpyxl
                 wb = openpyxl.load_workbook(io.BytesIO(file_data))
                 text = ""
                 for sheet in wb.sheetnames:
@@ -362,15 +442,10 @@ async def handle_document(message: Message):
         except Exception as e:
             await message.answer(f"Не удалось прочитать файл: {e}")
             return
-    allowed = await handle_with_access(message, content)
+    allowed = await handle_with_access(message, content, file_mb)
     if not allowed:
         return
-    response = ai.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=1500,
-        system=get_system_prompt(uid),
-        messages=conversations[uid]
-    )
+    response = ai.messages.create(model="claude-sonnet-4-5", max_tokens=1500, system=get_system_prompt(uid), messages=conversations[uid])
     reply = response.content[0].text
     conversations[uid].append({"role": "assistant", "content": reply})
     reply = re.sub(r'\*\*?(.*?)\*\*?', r'\1', reply)
@@ -384,12 +459,7 @@ async def handle(message: Message):
     allowed = await handle_with_access(message, message.text)
     if not allowed:
         return
-    response = ai.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=1500,
-        system=get_system_prompt(uid),
-        messages=conversations[uid]
-    )
+    response = ai.messages.create(model="claude-sonnet-4-5", max_tokens=1500, system=get_system_prompt(uid), messages=conversations[uid])
     reply = response.content[0].text
     conversations[uid].append({"role": "assistant", "content": reply})
     reply = re.sub(r'\*\*?(.*?)\*\*?', r'\1', reply)
