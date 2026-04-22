@@ -30,6 +30,9 @@ async def init_db():
             total_requests INTEGER DEFAULT 0
         )
     """)
+    await db.execute("""
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS total_requests INTEGER DEFAULT 0
+    """)
 
 async def get_user(user_id, username):
     row = await db.fetchrow("SELECT free_used, is_paid FROM users WHERE user_id = $1", user_id)
