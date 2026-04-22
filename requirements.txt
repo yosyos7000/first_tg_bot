@@ -1,3 +1,6 @@
 aiogram
 anthropic
 asyncpg
+aiohttp
+python-docx
+openpyxl
