@@ -3,7 +3,8 @@ import os
 import re
 import asyncpg
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 import anthropic
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -60,12 +61,35 @@ async def subscribe(message: Message):
     uid = message.from_user.id
     username = message.from_user.username or "без username"
     await message.answer("Заявка отправлена! Администратор свяжется с тобой.")
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Одобрить", callback_data=f"approve_{uid}")
+    builder.button(text="❌ Отклонить", callback_data=f"reject_{uid}")
     await bot.send_message(
         ADMIN_ID,
         f"💰 Новая заявка на подписку!\n"
         f"👤 @{username}\n"
-        f"🆔 ID: {uid}"
+        f"🆔 ID: {uid}",
+        reply_markup=builder.as_markup()
     )
+
+@dp.callback_query(F.data.startswith("approve_"))
+async def approve(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    uid = int(callback.data.split("_")[1])
+    await db.execute("UPDATE users SET is_paid = TRUE WHERE user_id = $1", uid)
+    await bot.send_message(uid, "✅ Ваша подписка активирована! Можете пользоваться без ограничений.")
+    await callback.message.edit_text(callback.message.text + "\n\n✅ Одобрено")
+    await callback.answer("Подписка активирована!")
+
+@dp.callback_query(F.data.startswith("reject_"))
+async def reject(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    uid = int(callback.data.split("_")[1])
+    await bot.send_message(uid, "❌ Ваша заявка отклонена. Напишите администратору @polyakovkonst для уточнения.")
+    await callback.message.edit_text(callback.message.text + "\n\n❌ Отклонено")
+    await callback.answer("Заявка отклонена")
 
 @dp.message(F.text == "/stats")
 async def stats(message: Message):
