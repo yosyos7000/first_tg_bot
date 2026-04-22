@@ -32,7 +32,7 @@ async def handle(message: Message):
         await message.answer(
             "Бесплатные запросы закончились.\n"
             "Подписка: 299 руб./мес.\n"
-            "Написать администратору: @твой_username"
+            "Написать администратору: @polyakovkonst"
         )
         return
 
