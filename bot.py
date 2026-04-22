@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
 import anthropic
@@ -7,9 +8,8 @@ import anthropic
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ANTHROPIC_KEY = os.getenv("ANTHROPIC_KEY")
 
-# Простая база: user_id → количество бесплатных запросов
 free_limits = {}
-FREE_LIMIT = 5  # бесплатных запросов
+FREE_LIMIT = 5
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -28,7 +28,7 @@ async def handle(message: Message):
     uid = message.from_user.id
     used = free_limits.get(uid, 0)
 
-    if used >= FREE_LIMIT:
+    if uid not in set() and used >= FREE_LIMIT:
         await message.answer(
             "Бесплатные запросы закончились.\n"
             "Подписка: 299 руб./мес.\n"
@@ -45,11 +45,10 @@ async def handle(message: Message):
         messages=[{"role": "user", "content": message.text}]
     )
 
-    import re
-text = response.content[0].text
-text = re.sub(r'\*\*?(.*?)\*\*?', r'\1', text)
-text = re.sub(r'#{1,6}\s?', '', text)
-await message.answer(text)
+    text = response.content[0].text
+    text = re.sub(r'\*\*?(.*?)\*\*?', r'\1', text)
+    text = re.sub(r'#{1,6}\s?', '', text)
+    await message.answer(text)
 
 async def main():
     await dp.start_polling(bot)
