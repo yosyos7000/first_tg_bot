@@ -2,8 +2,9 @@ import asyncio
 import os
 import re
 import asyncpg
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import anthropic
 
@@ -19,6 +20,11 @@ dp = Dispatcher()
 ai = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 db = None
 
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="👤 Мой профиль")]],
+    resize_keyboard=True
+)
+
 async def init_db():
     global db
     db = await asyncpg.connect(DATABASE_URL)
@@ -28,19 +34,25 @@ async def init_db():
             username TEXT,
             free_used INTEGER DEFAULT 0,
             is_paid BOOLEAN DEFAULT FALSE,
-            total_requests INTEGER DEFAULT 0
+            total_requests INTEGER DEFAULT 0,
+            subscription_until TIMESTAMP
         )
     """)
-    await db.execute("""
-        ALTER TABLE users ADD COLUMN IF NOT EXISTS total_requests INTEGER DEFAULT 0
-    """)
+    await db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS total_requests INTEGER DEFAULT 0")
+    await db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_until TIMESTAMP")
 
 async def get_user(user_id, username):
-    row = await db.fetchrow("SELECT free_used, is_paid FROM users WHERE user_id = $1", user_id)
+    row = await db.fetchrow("SELECT free_used, is_paid, subscription_until FROM users WHERE user_id = $1", user_id)
     if not row:
         await db.execute("INSERT INTO users (user_id, username) VALUES ($1, $2)", user_id, username)
-        return 0, False
-    return row["free_used"], row["is_paid"]
+        return 0, False, None
+    # Проверяем не истекла ли подписка
+    if row["is_paid"] and row["subscription_until"] and row["subscription_until"] < datetime.utcnow():
+        await db.execute("UPDATE users SET is_paid = FALSE WHERE user_id = $1", user_id)
+        await bot.send_message(user_id, 
+            "⚠️ Ваша подписка истекла. Напишите /subscribe чтобы продлить.")
+        return row["free_used"], False, row["subscription_until"]
+    return row["free_used"], row["is_paid"], row["subscription_until"]
 
 async def increment_usage(user_id):
     await db.execute("""
@@ -53,7 +65,28 @@ async def start(message: Message):
     await message.answer(
         "Привет! Я ИИ-помощник.\n"
         f"У тебя {FREE_LIMIT} бесплатных запросов.\n"
-        "Просто напиши свой вопрос!"
+        "Просто напиши свой вопрос!",
+        reply_markup=MAIN_KEYBOARD
+    )
+
+@dp.message(F.text == "👤 Мой профиль")
+async def profile(message: Message):
+    uid = message.from_user.id
+    username = message.from_user.username or "без username"
+    free_used, is_paid, sub_until = await get_user(uid, username)
+
+    if is_paid and sub_until:
+        sub_text = f"✅ Активна до: {sub_until.strftime('%d.%m.%Y %H:%M')}"
+    elif sub_until and not is_paid:
+        sub_text = f"❌ Истекла: {sub_until.strftime('%d.%m.%Y %H:%M')}"
+    else:
+        sub_text = f"🆓 Бесплатный план ({FREE_LIMIT - min(free_used, FREE_LIMIT)} запросов осталось)"
+
+    await message.answer(
+        f"👤 Профиль\n\n"
+        f"🤖 Модель: Claude Sonnet\n"
+        f"📋 Подписка: {sub_text}\n"
+        f"📨 Всего запросов: {free_used}"
     )
 
 @dp.message(F.text == "/subscribe")
@@ -62,7 +95,7 @@ async def subscribe(message: Message):
     username = message.from_user.username or "без username"
     await message.answer("Заявка отправлена! Администратор свяжется с тобой.")
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Одобрить", callback_data=f"approve_{uid}")
+    builder.button(text="✅ Одобрить (+1 месяц)", callback_data=f"approve_{uid}")
     builder.button(text="❌ Отклонить", callback_data=f"reject_{uid}")
     await bot.send_message(
         ADMIN_ID,
@@ -77,9 +110,26 @@ async def approve(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         return
     uid = int(callback.data.split("_")[1])
-    await db.execute("UPDATE users SET is_paid = TRUE WHERE user_id = $1", uid)
-    await bot.send_message(uid, "✅ Ваша подписка активирована! Можете пользоваться без ограничений.")
-    await callback.message.edit_text(callback.message.text + "\n\n✅ Одобрено")
+    row = await db.fetchrow("SELECT subscription_until, is_paid FROM users WHERE user_id = $1", uid)
+    
+    # Если подписка ещё активна — продлеваем от текущей даты окончания
+    if row and row["is_paid"] and row["subscription_until"] and row["subscription_until"] > datetime.utcnow():
+        new_until = row["subscription_until"] + timedelta(days=30)
+    else:
+        new_until = datetime.utcnow() + timedelta(days=30)
+
+    await db.execute(
+        "UPDATE users SET is_paid = TRUE, subscription_until = $1 WHERE user_id = $2",
+        new_until, uid
+    )
+    until_str = new_until.strftime('%d.%m.%Y %H:%M')
+    await bot.send_message(uid, 
+        f"✅ Подписка активирована!\n"
+        f"📅 Действует до: {until_str}\n\n"
+        f"Пользуйтесь без ограничений!")
+    await callback.message.edit_text(
+        callback.message.text + f"\n\n✅ Одобрено до {until_str}"
+    )
     await callback.answer("Подписка активирована!")
 
 @dp.callback_query(F.data.startswith("reject_"))
@@ -87,7 +137,8 @@ async def reject(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         return
     uid = int(callback.data.split("_")[1])
-    await bot.send_message(uid, "❌ Ваша заявка отклонена. Напишите администратору @polyakovkonst для уточнения.")
+    await bot.send_message(uid, 
+        "❌ Заявка отклонена. Напишите администратору @polyakovkonst для уточнения.")
     await callback.message.edit_text(callback.message.text + "\n\n❌ Отклонено")
     await callback.answer("Заявка отклонена")
 
@@ -115,7 +166,7 @@ async def stats(message: Message):
 async def handle(message: Message):
     uid = message.from_user.id
     username = message.from_user.username or "без username"
-    free_used, is_paid = await get_user(uid, username)
+    free_used, is_paid, sub_until = await get_user(uid, username)
 
     if uid != ADMIN_ID and not is_paid and free_used >= FREE_LIMIT:
         await message.answer(
@@ -136,7 +187,7 @@ async def handle(message: Message):
     text = response.content[0].text
     text = re.sub(r'\*\*?(.*?)\*\*?', r'\1', text)
     text = re.sub(r'#{1,6}\s?', '', text)
-    await message.answer(text)
+    await message.answer(text, reply_markup=MAIN_KEYBOARD)
 
 async def main():
     await init_db()
