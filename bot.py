@@ -26,7 +26,8 @@ async def init_db():
             user_id BIGINT PRIMARY KEY,
             username TEXT,
             free_used INTEGER DEFAULT 0,
-            is_paid BOOLEAN DEFAULT FALSE
+            is_paid BOOLEAN DEFAULT FALSE,
+            total_requests INTEGER DEFAULT 0
         )
     """)
 
@@ -38,7 +39,10 @@ async def get_user(user_id, username):
     return row["free_used"], row["is_paid"]
 
 async def increment_usage(user_id):
-    await db.execute("UPDATE users SET free_used = free_used + 1 WHERE user_id = $1", user_id)
+    await db.execute("""
+        UPDATE users SET free_used = free_used + 1, total_requests = total_requests + 1 
+        WHERE user_id = $1
+    """, user_id)
 
 @dp.message(F.text == "/start")
 async def start(message: Message):
@@ -58,6 +62,26 @@ async def subscribe(message: Message):
         f"💰 Новая заявка на подписку!\n"
         f"👤 @{username}\n"
         f"🆔 ID: {uid}"
+    )
+
+@dp.message(F.text == "/stats")
+async def stats(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    total_users = await db.fetchval("SELECT COUNT(*) FROM users")
+    paid_users = await db.fetchval("SELECT COUNT(*) FROM users WHERE is_paid = TRUE")
+    total_requests = await db.fetchval("SELECT SUM(total_requests) FROM users")
+    top_users = await db.fetch("""
+        SELECT username, total_requests FROM users 
+        ORDER BY total_requests DESC LIMIT 5
+    """)
+    top_text = "\n".join([f"@{r['username']} — {r['total_requests']} запросов" for r in top_users])
+    await message.answer(
+        f"📊 Статистика бота\n\n"
+        f"👥 Всего пользователей: {total_users}\n"
+        f"💰 Платных: {paid_users}\n"
+        f"📨 Всего запросов: {total_requests or 0}\n\n"
+        f"🏆 Топ-5 пользователей:\n{top_text}"
     )
 
 @dp.message()
