@@ -73,7 +73,13 @@ async def process_message(uid, messages_to_send):
     )
     return response.content[0].text
 
-@dp.message(F.text == "/start")
+@dp.message(F.text == "/support")
+async def support(message: Message):
+    await message.answer(
+        "🆘 Поддержка\n\n"
+        "Если у вас возникли вопросы или проблемы — напишите администратору:\n"
+        "@polyakovkonst"
+    )
 async def start(message: Message):
     conversations.pop(message.from_user.id, None)
     await message.answer(
