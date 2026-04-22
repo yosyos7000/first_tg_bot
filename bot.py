@@ -20,10 +20,7 @@ dp = Dispatcher()
 ai = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 db = None
 
-MAIN_KEYBOARD = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="👤 Мой профиль")]],
-    resize_keyboard=True
-)
+from aiogram.types import ReplyKeyboardRemove
 
 async def init_db():
     global db
@@ -66,10 +63,10 @@ async def start(message: Message):
         "Привет! Я ИИ-помощник.\n"
         f"У тебя {FREE_LIMIT} бесплатных запросов.\n"
         "Просто напиши свой вопрос!",
-        reply_markup=MAIN_KEYBOARD
+        reply_markup=ReplyKeyboardRemove()
     )
 
-@dp.message(F.text == "👤 Мой профиль")
+@dp.message(F.text.in_({"👤 Мой профиль", "/profile"}))
 async def profile(message: Message):
     uid = message.from_user.id
     username = message.from_user.username or "без username"
@@ -187,7 +184,7 @@ async def handle(message: Message):
     text = response.content[0].text
     text = re.sub(r'\*\*?(.*?)\*\*?', r'\1', text)
     text = re.sub(r'#{1,6}\s?', '', text)
-    await message.answer(text, reply_markup=MAIN_KEYBOARD)
+    await message.answer(text, reply_markup=ReplyKeyboardRemove())
 
 async def main():
     await init_db()
