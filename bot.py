@@ -60,4 +60,11 @@ async def handle(message: Message):
 
     text = response.content[0].text
     text = re.sub(r'\*\*?(.*?)\*\*?', r'\1', text)
-    text
+    text = re.sub(r'#{1,6}\s?', '', text)
+    await message.answer(text)
+
+async def main():
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
