@@ -45,7 +45,11 @@ async def handle(message: Message):
         messages=[{"role": "user", "content": message.text}]
     )
 
-    await message.answer(response.content[0].text)
+    import re
+text = response.content[0].text
+text = re.sub(r'\*\*?(.*?)\*\*?', r'\1', text)
+text = re.sub(r'#{1,6}\s?', '', text)
+await message.answer(text)
 
 async def main():
     await dp.start_polling(bot)
