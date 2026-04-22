@@ -9,7 +9,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ANTHROPIC_KEY = os.getenv("ANTHROPIC_KEY")
 
 ADMIN_ID = 416065237
-PAID_USERS = set()
+PAID_USERS = {416065237}
 FREE_LIMIT = 5
 free_limits = {}
 
