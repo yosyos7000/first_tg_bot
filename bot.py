@@ -2,12 +2,14 @@ import asyncio
 import os
 import re
 import asyncpg
+import aiohttp
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import ReplyKeyboardRemove
 import anthropic
+import base64
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ANTHROPIC_KEY = os.getenv("ANTHROPIC_KEY")
@@ -15,14 +17,12 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 ADMIN_ID = 416065237
 FREE_LIMIT = 5
-MAX_HISTORY = 10  # сколько последних сообщений помнит бот
+MAX_HISTORY = 10
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 ai = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 db = None
-
-# История диалогов в памяти: {user_id: [{"role": ..., "content": ...}]}
 conversations = {}
 
 async def init_db():
@@ -58,13 +58,32 @@ async def increment_usage(user_id):
         WHERE user_id = $1
     """, user_id)
 
+async def download_file(file_id):
+    file = await bot.get_file(file_id)
+    url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            return await resp.read()
+
+async def process_message(uid, messages_to_send):
+    response = ai.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=1500,
+        messages=messages_to_send
+    )
+    return response.content[0].text
+
 @dp.message(F.text == "/start")
 async def start(message: Message):
     conversations.pop(message.from_user.id, None)
     await message.answer(
         "Привет! Я ИИ-помощник.\n"
-        f"У тебя {FREE_LIMIT} бесплатных запросов.\n"
-        "Просто напиши свой вопрос!",
+        f"У тебя {FREE_LIMIT} бесплатных запросов.\n\n"
+        "Я умею:\n"
+        "💬 Отвечать на вопросы\n"
+        "🖼 Анализировать фото\n"
+        "📄 Читать PDF, TXT, DOCX, Excel\n\n"
+        "Просто напиши или отправь файл!",
         reply_markup=ReplyKeyboardRemove()
     )
 
@@ -73,14 +92,12 @@ async def profile(message: Message):
     uid = message.from_user.id
     username = message.from_user.username or "без username"
     free_used, is_paid, sub_until = await get_user(uid, username)
-
     if is_paid and sub_until:
         sub_text = f"✅ Активна до: {sub_until.strftime('%d.%m.%Y %H:%M')}"
     elif sub_until and not is_paid:
         sub_text = f"❌ Истекла: {sub_until.strftime('%d.%m.%Y %H:%M')}"
     else:
         sub_text = f"🆓 Бесплатный план ({FREE_LIMIT - min(free_used, FREE_LIMIT)} запросов осталось)"
-
     await message.answer(
         f"👤 Профиль\n\n"
         f"🤖 Модель: Claude Sonnet\n"
@@ -114,10 +131,7 @@ async def approve(callback: CallbackQuery):
         new_until = row["subscription_until"] + timedelta(days=30)
     else:
         new_until = datetime.utcnow() + timedelta(days=30)
-    await db.execute(
-        "UPDATE users SET is_paid = TRUE, subscription_until = $1 WHERE user_id = $2",
-        new_until, uid
-    )
+    await db.execute("UPDATE users SET is_paid = TRUE, subscription_until = $1 WHERE user_id = $2", new_until, uid)
     until_str = new_until.strftime('%d.%m.%Y %H:%M')
     await bot.send_message(uid,
         f"✅ Подписка активирована!\n"
@@ -157,8 +171,7 @@ async def clear(message: Message):
     conversations.pop(message.from_user.id, None)
     await message.answer("🗑 История диалога очищена. Начинаем заново!")
 
-@dp.message()
-async def handle(message: Message):
+async def handle_with_access(message: Message, content):
     uid = message.from_user.id
     username = message.from_user.username or "без username"
     free_used, is_paid, sub_until = await get_user(uid, username)
@@ -168,30 +181,132 @@ async def handle(message: Message):
             "Бесплатные запросы закончились.\n"
             "Напиши /subscribe чтобы оформить подписку — 299 руб./мес."
         )
-        return
+        return False
 
     await increment_usage(uid)
 
-    # Добавляем сообщение пользователя в историю
     if uid not in conversations:
         conversations[uid] = []
-    conversations[uid].append({"role": "user", "content": message.text})
-
-    # Обрезаем историю до MAX_HISTORY сообщений
+    conversations[uid].append({"role": "user", "content": content})
     if len(conversations[uid]) > MAX_HISTORY * 2:
         conversations[uid] = conversations[uid][-MAX_HISTORY * 2:]
 
+    return True
+
+@dp.message(F.photo)
+async def handle_photo(message: Message):
+    uid = message.from_user.id
     await bot.send_chat_action(message.chat.id, "typing")
-    
+
+    photo = message.photo[-1]
+    file_data = await download_file(photo.file_id)
+    b64 = base64.standard_b64encode(file_data).decode("utf-8")
+    caption = message.caption or "Опиши что на этом изображении"
+
+    content = [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+        {"type": "text", "text": caption}
+    ]
+
+    allowed = await handle_with_access(message, content)
+    if not allowed:
+        return
+
     response = ai.messages.create(
         model="claude-sonnet-4-5",
-        max_tokens=1000,
+        max_tokens=1500,
         messages=conversations[uid]
     )
-
     reply = response.content[0].text
     conversations[uid].append({"role": "assistant", "content": reply})
+    reply = re.sub(r'\*\*?(.*?)\*\*?', r'\1', reply)
+    reply = re.sub(r'#{1,6}\s?', '', reply)
+    await message.answer(reply)
 
+@dp.message(F.document)
+async def handle_document(message: Message):
+    uid = message.from_user.id
+    await bot.send_chat_action(message.chat.id, "typing")
+
+    doc = message.document
+    mime = doc.mime_type or ""
+    name = doc.file_name or ""
+    caption = message.caption or "Проанализируй этот файл"
+
+    file_data = await download_file(doc.file_id)
+
+    # PDF
+    if mime == "application/pdf":
+        b64 = base64.standard_b64encode(file_data).decode("utf-8")
+        content = [
+            {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": b64}},
+            {"type": "text", "text": caption}
+        ]
+    # Изображения присланные как файл
+    elif mime.startswith("image/"):
+        b64 = base64.standard_b64encode(file_data).decode("utf-8")
+        content = [
+            {"type": "image", "source": {"type": "base64", "media_type": mime, "data": b64}},
+            {"type": "text", "text": caption}
+        ]
+    # Текстовые файлы: txt, csv, docx, xlsx и др.
+    else:
+        try:
+            if mime in ("application/vnd.openxmlformats-officedocument.wordprocessingml.document",) or name.endswith(".docx"):
+                import io
+                from docx import Document
+                doc_obj = Document(io.BytesIO(file_data))
+                text = "\n".join([p.text for p in doc_obj.paragraphs])
+            elif mime in ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                         "application/vnd.ms-excel") or name.endswith((".xlsx", ".xls")):
+                import io
+                import openpyxl
+                wb = openpyxl.load_workbook(io.BytesIO(file_data))
+                text = ""
+                for sheet in wb.sheetnames:
+                    ws = wb[sheet]
+                    text += f"\n[Лист: {sheet}]\n"
+                    for row in ws.iter_rows(values_only=True):
+                        text += "\t".join([str(c) if c is not None else "" for c in row]) + "\n"
+            else:
+                text = file_data.decode("utf-8", errors="ignore")
+
+            content = f"{caption}\n\nСодержимое файла «{name}»:\n\n{text[:15000]}"
+        except Exception as e:
+            await message.answer(f"Не удалось прочитать файл: {e}")
+            return
+
+    allowed = await handle_with_access(message, content)
+    if not allowed:
+        return
+
+    response = ai.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=1500,
+        messages=conversations[uid]
+    )
+    reply = response.content[0].text
+    conversations[uid].append({"role": "assistant", "content": reply})
+    reply = re.sub(r'\*\*?(.*?)\*\*?', r'\1', reply)
+    reply = re.sub(r'#{1,6}\s?', '', reply)
+    await message.answer(reply)
+
+@dp.message()
+async def handle(message: Message):
+    uid = message.from_user.id
+    await bot.send_chat_action(message.chat.id, "typing")
+
+    allowed = await handle_with_access(message, message.text)
+    if not allowed:
+        return
+
+    response = ai.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=1500,
+        messages=conversations[uid]
+    )
+    reply = response.content[0].text
+    conversations[uid].append({"role": "assistant", "content": reply})
     reply = re.sub(r'\*\*?(.*?)\*\*?', r'\1', reply)
     reply = re.sub(r'#{1,6}\s?', '', reply)
     await message.answer(reply, reply_markup=ReplyKeyboardRemove())
