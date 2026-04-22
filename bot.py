@@ -8,8 +8,10 @@ import anthropic
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ANTHROPIC_KEY = os.getenv("ANTHROPIC_KEY")
 
-free_limits = {}
+ADMIN_ID = 416065237
+PAID_USERS = set()
 FREE_LIMIT = 5
+free_limits = {}
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -23,16 +25,27 @@ async def start(message: Message):
         "Просто напиши свой вопрос!"
     )
 
+@dp.message(F.text == "/subscribe")
+async def subscribe(message: Message):
+    uid = message.from_user.id
+    username = message.from_user.username or "без username"
+    await message.answer("Заявка отправлена! Администратор свяжется с тобой.")
+    await bot.send_message(
+        ADMIN_ID,
+        f"💰 Новая заявка на подписку!\n"
+        f"👤 @{username}\n"
+        f"🆔 ID: {uid}"
+    )
+
 @dp.message()
 async def handle(message: Message):
     uid = message.from_user.id
     used = free_limits.get(uid, 0)
 
-    if uid not in set() and used >= FREE_LIMIT:
+    if uid != ADMIN_ID and uid not in PAID_USERS and used >= FREE_LIMIT:
         await message.answer(
             "Бесплатные запросы закончились.\n"
-            "Подписка: 299 руб./мес.\n"
-            "Написать администратору: @polyakovkonst"
+            "Напиши /subscribe чтобы оформить подписку — 299 руб./мес."
         )
         return
 
@@ -47,11 +60,4 @@ async def handle(message: Message):
 
     text = response.content[0].text
     text = re.sub(r'\*\*?(.*?)\*\*?', r'\1', text)
-    text = re.sub(r'#{1,6}\s?', '', text)
-    await message.answer(text)
-
-async def main():
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    text
