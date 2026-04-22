@@ -40,7 +40,7 @@ async def handle(message: Message):
     await message.answer("Думаю...")
 
     response = ai.messages.create(
-        model="model="claude-sonnet-4-5",
+        model="claude-sonnet-4-5",
         max_tokens=1000,
         messages=[{"role": "user", "content": message.text}]
     )
