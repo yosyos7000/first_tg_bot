@@ -181,8 +181,8 @@ async def handle(message: Message):
     if len(conversations[uid]) > MAX_HISTORY * 2:
         conversations[uid] = conversations[uid][-MAX_HISTORY * 2:]
 
-    await message.answer("Думаю...")
-
+    await bot.send_chat_action(message.chat.id, "typing")
+    
     response = ai.messages.create(
         model="claude-sonnet-4-5",
         max_tokens=1000,
