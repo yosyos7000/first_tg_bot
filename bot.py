@@ -55,7 +55,7 @@ WELCOME_TEXT = """👋 Привет! Я твой ИИ-помощник на ба
 /help — как пользоваться ботом
 /subscribe — оформить подписку
 
-У тебя есть {limit} бесплатных запросов для знакомства.
+У тебя есть {limit} бесплатных запросов каждый день.
 Просто напиши свой вопрос или отправь файл! 👇"""
 
 HELP_TEXT = """📖 Как пользоваться ботом
@@ -110,18 +110,17 @@ async def init_db():
             await db.execute(f"ALTER TABLE users ADD COLUMN {col} {'TEXT' if col == 'plan' else 'TIMESTAMP' if 'until' in col or 'start' in col else 'FLOAT' if 'mb' in col else 'INTEGER'} DEFAULT {defval}")
         except:
             pass
+    await db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS free_reset_date DATE")
 
 async def get_user(user_id, username):
     row = await db.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
     if not row:
         await db.execute("INSERT INTO users (user_id, username) VALUES ($1, $2)", user_id, username)
         return await db.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
-    # Проверяем истечение подписки
     if row["is_paid"] and row["subscription_until"] and row["subscription_until"] < datetime.utcnow():
         await db.execute("UPDATE users SET is_paid = FALSE, plan = 'free', requests_used = 0, file_mb_used = 0 WHERE user_id = $1", user_id)
         await bot.send_message(user_id, "⚠️ Ваша подписка истекла. Напишите /subscribe чтобы продлить.")
         return await db.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
-    # Сбрасываем счётчики если новый период
     if row["is_paid"] and row["period_start"]:
         period_end = row["period_start"] + timedelta(days=30)
         if datetime.utcnow() > period_end:
@@ -130,29 +129,38 @@ async def get_user(user_id, username):
     return row
 
 async def check_limits(user_id, username, file_mb=0):
-    """Проверяет лимиты. Возвращает (allowed, error_message)"""
     if user_id == ADMIN_ID:
         return True, None
     row = await get_user(user_id, username)
     plan_key = row["plan"] or "free"
 
     if not row["is_paid"]:
-        if row["free_used"] >= FREE_LIMIT:
-            return False, "Бесплатные запросы закончились.\nНапиши /subscribe чтобы оформить подписку."
+        today = datetime.utcnow().date()
+        reset_date = row["free_reset_date"] if row["free_reset_date"] else None
+        if reset_date != today:
+            await db.execute(
+                "UPDATE users SET free_used = 0, free_reset_date = $1 WHERE user_id = $2",
+                today, user_id
+            )
+            free_used = 0
+        else:
+            free_used = row["free_used"]
+        if free_used >= FREE_LIMIT:
+            return False, (
+                f"На сегодня бесплатные запросы закончились ({FREE_LIMIT}/день).\n"
+                "Возвращайся завтра или напиши /subscribe для безлимитного доступа."
+            )
         return True, None
 
     plan = PLANS.get(plan_key, PLANS["basic"])
-
     if row["requests_used"] >= plan["requests"]:
         return False, f"Лимит запросов на этот месяц исчерпан ({plan['requests']} запросов).\nНапиши /subscribe для смены тарифа."
-
     if file_mb > 0:
         if file_mb > plan["file_mb_single"]:
-            return False, f"Файл слишком большой. Максимальный размер для вашего тарифа: {plan['file_mb_single']} МБ."
+            return False, f"Файл слишком большой. Максимальный размер: {plan['file_mb_single']} МБ."
         if (row["file_mb_used"] or 0) + file_mb > plan["file_mb_total"]:
             used = round(row["file_mb_used"] or 0, 1)
             return False, f"Превышен месячный лимит файлов. Использовано: {used} МБ из {plan['file_mb_total']} МБ."
-
     return True, None
 
 async def increment_usage(user_id, file_mb=0):
@@ -236,7 +244,7 @@ async def profile(message: Message):
     elif row["subscription_until"] and not row["is_paid"]:
         sub_text = f"❌ Истекла: {row['subscription_until'].strftime('%d.%m.%Y %H:%M')}"
     else:
-        sub_text = f"🆓 Бесплатный план ({FREE_LIMIT - min(row['free_used'], FREE_LIMIT)} запросов осталось)"
+        sub_text = f"🆓 Бесплатный план ({FREE_LIMIT - min(row['free_used'], FREE_LIMIT)} запросов осталось сегодня)"
 
     await message.answer(
         f"👤 Профиль\n\n"
@@ -249,7 +257,6 @@ async def profile(message: Message):
 @dp.message(F.text == "/subscribe")
 async def subscribe(message: Message):
     uid = message.from_user.id
-    username = message.from_user.username or "без username"
     await message.answer(
         "💰 Выбери тариф:\n\n"
         "🔹 Базовый — 299 руб./мес.\n200 запросов + 50 МБ файлов\n\n"
@@ -293,23 +300,16 @@ async def request_plan(callback: CallbackQuery):
 async def approve(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         return
-    print(f"APPROVE DEBUG: {callback.data}")
     parts = callback.data.split("_")
-    print(f"PARTS: {parts}")
-    
     if len(parts) < 3:
         await callback.answer("Ошибка: старый формат кнопки")
         return
-    
     try:
         uid = int(parts[1])
         plan_key = parts[2]
     except Exception as e:
-        print(f"PARSE ERROR: {e}")
-        await callback.answer(f"Ошибка парсинга: {e}")
+        await callback.answer(f"Ошибка: {e}")
         return
-
-    print(f"UID: {uid}, PLAN: {plan_key}")
     plan = PLANS.get(plan_key, PLANS["basic"])
     row = await db.fetchrow("SELECT subscription_until, is_paid FROM users WHERE user_id = $1", uid)
     if row and row["is_paid"] and row["subscription_until"] and row["subscription_until"] > datetime.utcnow():
@@ -321,7 +321,6 @@ async def approve(callback: CallbackQuery):
         requests_used = 0, file_mb_used = 0, period_start = $3
         WHERE user_id = $4
     """, new_until, plan_key, datetime.utcnow(), uid)
-    print(f"DB UPDATED for {uid}")
     until_str = new_until.strftime('%d.%m.%Y %H:%M')
     req_limit = "∞" if plan["requests"] > 9999 else str(plan["requests"])
     await bot.send_message(uid,
@@ -333,6 +332,7 @@ async def approve(callback: CallbackQuery):
         f"Пользуйтесь без ограничений!")
     await callback.message.edit_text(callback.message.text + f"\n\n✅ Одобрено: {plan['name']} до {until_str}")
     await callback.answer("Подписка активирована!")
+
 @dp.callback_query(F.data.startswith("reject_"))
 async def reject(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
