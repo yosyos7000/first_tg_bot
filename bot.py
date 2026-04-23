@@ -262,7 +262,7 @@ async def rewrite_and_post(title, text, link):
     )
     post_text = response.content[0].text
     post_text = re.sub(r'\*\*?(.*?)\*\*?', r'\1', post_text)
-    post_text = re.sub(r'#{1,6}\s?', '', post_text)
+    post_text = re.sub(r'^#{1,6}\s', '', post_text, flags=re.MULTILINE)
     post_text += f'\n\n<a href="{link}">Читать источник</a>'
     post_text += f"\n@probiznav"
     await bot.send_message(CHANNEL_ID, post_text, parse_mode="HTML", disable_web_page_preview=True)
