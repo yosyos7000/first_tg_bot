@@ -216,14 +216,13 @@ async def fetch_and_post():
     for url in RSS_SOURCES:
         try:
             feed = feedparser.parse(url)
-            for entry in feed.entries[:2]:
+            for entry in feed.entries[:1]:
                 h = hashlib.md5(entry.link.encode()).hexdigest()
                 if h in posted_hashes:
                     continue
                 posted_hashes.add(h)
                 post_count += 1
 
-                # Ищем картинку в записи
                 image_url = None
                 if hasattr(entry, 'media_content') and entry.media_content:
                     image_url = entry.media_content[0].get('url')
@@ -257,7 +256,6 @@ async def fetch_and_post():
                 text += f'\n\n<a href="{entry.link}">Читать источник</a>'
                 text += f"\n@probiznav"
 
-                # Каждый 4-5 пост с картинкой
                 send_with_image = (post_count % 4 == 0) and image_url
                 try:
                     if send_with_image:
@@ -270,14 +268,12 @@ async def fetch_and_post():
                     else:
                         await bot.send_message(CHANNEL_ID, text, parse_mode="HTML", disable_web_page_preview=True)
                 except Exception:
-                    await bot.send_message(CHANNEL_ID, text, parse_mode="HTML")                        await bot.send_message(CHANNEL_ID, text, parse_mode="HTML", disable_web_page_preview=True)
-                except Exception:
                     await bot.send_message(CHANNEL_ID, text, parse_mode="HTML")
 
                 await asyncio.sleep(10)
         except Exception as e:
             print(f"RSS error {url}: {e}")
-            
+
 async def scheduler():
     last_posted_hour = -1
     while True:
@@ -524,8 +520,6 @@ async def post_now(message: Message):
     await message.answer("🔄 Запускаю публикацию новостей...")
     await fetch_and_post()
     await message.answer("✅ Готово! Проверяй канал @probiznav")
-async def support(message: Message):
-    await message.answer("🆘 Поддержка\n\nЕсли у вас возникли вопросы — напишите администратору:\n@polyakovkonst")
 
 async def handle_with_access(message: Message, content, file_mb=0):
     uid = message.from_user.id
