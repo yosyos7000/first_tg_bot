@@ -556,13 +556,15 @@ async def manual_post(message: Message):
     url = parts[1].strip()
     await message.answer("🔄 Читаю статью...")
     try:
-        text = await get_article_text(url)
+        text = await asyncio.wait_for(get_article_text(url), timeout=20)
         if not text or len(text) < 100:
-            await message.answer("❌ Не удалось прочитать статью. Попробуй другую ссылку.")
+            await message.answer("❌ Не удалось прочитать статью — сайт не отдал текст или заблокировал запрос.")
             return
         title = url.split("/")[-2] or "Новость"
         await rewrite_and_post(title, text, url)
         await message.answer("✅ Опубликовано в канал!")
+    except asyncio.TimeoutError:
+        await message.answer("❌ Сайт не ответил за 20 секунд — скорее всего блокирует автоматические запросы.")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
 
