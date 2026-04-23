@@ -267,45 +267,40 @@ async def profile(message: Message):
         f"📋 Подписка: {sub_text}\n"
         f"📊 Всего запросов за всё время: {row['total_requests']}"
     )
-
+    
+async def message_answer_safe(callback, text):
+    try:
+        await callback.message.edit_text(text)
+    except:
+        await callback.message.answer(text)
 @dp.message(F.text == "/subscribe")
 async def subscribe(message: Message):
     uid = message.from_user.id
     await message.answer(
-        "💰 Выбери тариф и способ оплаты:\n\n"
-        "🔹 Базовый — 250 ⭐️/мес.\n200 запросов + 50 МБ файлов\n\n"
-        "🔸 Стандарт — 500 ⭐️/мес.\n500 запросов + 150 МБ файлов\n\n"
-        "💎 Про — 830 ⭐️/мес.\nБезлимит запросов + 500 МБ файлов"
+        "💰 Выбери тариф:\n\n"
+        "🔹 Базовый — 299 руб./мес.\n200 запросов + 50 МБ файлов\n\n"
+        "🔸 Стандарт — 599 руб./мес.\n500 запросов + 150 МБ файлов\n\n"
+        "💎 Про — 999 руб./мес.\nБезлимит запросов + 500 МБ файлов"
     )
     builder = InlineKeyboardBuilder()
     for key, plan in PLANS.items():
         builder.button(
-            text=f"⭐️ {plan['name']} — {plan['stars']} Stars",
+            text=f"{plan['name']} — {plan['price']}",
             callback_data=f"buy_{key}"
         )
-        builder.button(
-            text=f"🤝 {plan['name']} — тестовый доступ",
-            callback_data=f"req_{key}_{uid}"
-        )
-    builder.adjust(2)
-    await message.answer("👇 Выбери тариф и способ:", reply_markup=builder.as_markup())
+    builder.button(text="🤝 Тестовый доступ", callback_data=f"test_{uid}")
+    builder.adjust(1)
+    await message.answer("👇 Выбери тариф:", reply_markup=builder.as_markup())
 
-@dp.callback_query(F.data.startswith("req_"))
-async def request_plan(callback: CallbackQuery):
-    parts = callback.data.split("_")
-    plan_key = parts[1]
-    uid = int(parts[2])
+@dp.callback_query(F.data.startswith("test_"))
+async def test_access(callback: CallbackQuery):
+    uid = int(callback.data.split("_")[1])
     username = callback.from_user.username or "без username"
     full_name = callback.from_user.full_name or "без имени"
-    plan = PLANS.get(plan_key)
-    if not plan:
-        return
-    await callback.message.edit_text(
-        f"✅ Заявка на тестовый доступ «{plan['name']}» отправлена!\n"
-        f"Администратор свяжется с тобой."
-    )
+    await message_answer_safe(callback, "✅ Заявка на тестовый доступ отправлена!\nАдминистратор свяжется с тобой.")
     builder = InlineKeyboardBuilder()
-    builder.button(text=f"✅ Одобрить «{plan['name']}»", callback_data=f"approve_{uid}_{plan_key}")
+    for key, plan in PLANS.items():
+        builder.button(text=f"✅ Одобрить «{plan['name']}»", callback_data=f"approve_{uid}_{key}")
     builder.button(text="❌ Отклонить", callback_data=f"reject_{uid}")
     builder.adjust(1)
     await bot.send_message(
@@ -313,20 +308,27 @@ async def request_plan(callback: CallbackQuery):
         f"🤝 Заявка на тестовый доступ!\n"
         f"👤 @{username}\n"
         f"📝 Имя: {full_name}\n"
-        f"🆔 ID: {uid}\n"
-        f"📦 Тариф: {plan['name']}",
+        f"🆔 ID: {uid}",
         reply_markup=builder.as_markup()
     )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("buy_"))
+async def buy_plan(callback: CallbackQuery):
+    plan_key = callback.data.split("_")[1]
+    plan = PLANS.get(plan_key)
+    if not plan:
+        return
     await callback.answer()
     await bot.send_invoice(
         chat_id=callback.from_user.id,
         title=f"Подписка «{plan['name']}»",
-        description=f"{plan['requests'] if plan['requests'] < 9999 else 'Безлимит'} запросов + {plan['file_mb_total']} МБ файлов на 30 дней",
+        description=f"{plan['requests'] if plan['requests'] < 9999 else 'Безлимит'} запросов + {plan['file_mb_total']} МБ файлов на 30 дней\n({plan['price']})",
         payload=f"sub_{plan_key}",
         currency="XTR",
         prices=[LabeledPrice(label=plan['name'], amount=plan['stars'])]
     )
-
+    
 @dp.pre_checkout_query()
 async def pre_checkout(query: PreCheckoutQuery):
     await query.answer(ok=True)
