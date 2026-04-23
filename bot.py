@@ -254,23 +254,25 @@ async def fetch_and_post():
                 text = response.content[0].text
                 text = re.sub(r'\*\*?(.*?)\*\*?', r'\1', text)
                 text = re.sub(r'#{1,6}\s?', '', text)
-                text += f"\n\nИсточник: {entry.link}"
+                text += f'\n\n<a href="{entry.link}">Читать источник</a>'
                 text += f"\n@probiznav"
 
                 # Каждый 4-5 пост с картинкой
                 send_with_image = (post_count % 4 == 0) and image_url
-
                 try:
                     if send_with_image:
                         await bot.send_photo(
                             CHANNEL_ID,
                             photo=image_url,
-                            caption=text
+                            caption=text,
+                            parse_mode="HTML"
                         )
                     else:
-                        await bot.send_message(CHANNEL_ID, text, disable_web_page_preview=False)
+                        await bot.send_message(CHANNEL_ID, text, parse_mode="HTML", disable_web_page_preview=True)
                 except Exception:
-                    await bot.send_message(CHANNEL_ID, text)
+                    await bot.send_message(CHANNEL_ID, text, parse_mode="HTML")                        await bot.send_message(CHANNEL_ID, text, parse_mode="HTML", disable_web_page_preview=True)
+                except Exception:
+                    await bot.send_message(CHANNEL_ID, text, parse_mode="HTML")
 
                 await asyncio.sleep(10)
         except Exception as e:
