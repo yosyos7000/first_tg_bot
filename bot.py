@@ -6,7 +6,7 @@ import aiohttp
 import base64
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import ReplyKeyboardRemove
 import anthropic
@@ -20,9 +20,9 @@ FREE_LIMIT = 5
 MAX_HISTORY = 10
 
 PLANS = {
-    "basic":    {"name": "Базовый",   "price": "299 руб./мес.",  "requests": 200,  "file_mb_total": 50,  "file_mb_single": 10},
-    "standard": {"name": "Стандарт",  "price": "599 руб./мес.",  "requests": 500,  "file_mb_total": 150, "file_mb_single": 10},
-    "pro":      {"name": "Про",       "price": "999 руб./мес.",  "requests": 99999,"file_mb_total": 500, "file_mb_single": 25},
+    "basic":    {"name": "Базовый",   "price": "299 руб./мес.",  "stars": 250,  "requests": 200,  "file_mb_total": 50,  "file_mb_single": 10},
+    "standard": {"name": "Стандарт",  "price": "599 руб./мес.",  "stars": 500,  "requests": 500,  "file_mb_total": 150, "file_mb_single": 10},
+    "pro":      {"name": "Про",       "price": "999 руб./мес.",  "stars": 830,  "requests": 99999,"file_mb_total": 500, "file_mb_single": 25},
 }
 
 bot = Bot(token=BOT_TOKEN)
@@ -80,9 +80,9 @@ HELP_TEXT = """📖 Как пользоваться ботом
 Бот помнит последние {history} сообщений. Используй /clear чтобы начать новую тему с чистого листа.
 
 💰 Тарифы (/subscribe):
-— Базовый: 299 руб./мес. — 200 запросов + 50 МБ файлов
-— Стандарт: 599 руб./мес. — 500 запросов + 150 МБ файлов
-— Про: 999 руб./мес. — безлимит запросов + 500 МБ файлов"""
+— Базовый: 250 ⭐️ — 200 запросов + 50 МБ файлов
+— Стандарт: 500 ⭐️ — 500 запросов + 150 МБ файлов
+— Про: 830 ⭐️ — безлимит запросов + 500 МБ файлов"""
 
 async def init_db():
     global db
@@ -187,6 +187,20 @@ async def download_file(file_id):
         async with session.get(url) as resp:
             return await resp.read()
 
+async def activate_subscription(user_id, plan_key):
+    plan = PLANS.get(plan_key, PLANS["basic"])
+    row = await db.fetchrow("SELECT subscription_until, is_paid FROM users WHERE user_id = $1", user_id)
+    if row and row["is_paid"] and row["subscription_until"] and row["subscription_until"] > datetime.utcnow():
+        new_until = row["subscription_until"] + timedelta(days=30)
+    else:
+        new_until = datetime.utcnow() + timedelta(days=30)
+    await db.execute("""
+        UPDATE users SET is_paid = TRUE, subscription_until = $1, plan = $2,
+        requests_used = 0, file_mb_used = 0, period_start = $3
+        WHERE user_id = $4
+    """, new_until, plan_key, datetime.utcnow(), user_id)
+    return new_until
+
 @dp.message(F.text == "/start")
 async def start(message: Message):
     conversations.pop(message.from_user.id, None)
@@ -258,17 +272,23 @@ async def profile(message: Message):
 async def subscribe(message: Message):
     uid = message.from_user.id
     await message.answer(
-        "💰 Выбери тариф:\n\n"
-        "🔹 Базовый — 299 руб./мес.\n200 запросов + 50 МБ файлов\n\n"
-        "🔸 Стандарт — 599 руб./мес.\n500 запросов + 150 МБ файлов\n\n"
-        "💎 Про — 999 руб./мес.\nБезлимит запросов + 500 МБ файлов\n\n"
-        "Выбери тариф и отправь заявку — администратор свяжется с тобой."
+        "💰 Выбери тариф и способ оплаты:\n\n"
+        "🔹 Базовый — 250 ⭐️/мес.\n200 запросов + 50 МБ файлов\n\n"
+        "🔸 Стандарт — 500 ⭐️/мес.\n500 запросов + 150 МБ файлов\n\n"
+        "💎 Про — 830 ⭐️/мес.\nБезлимит запросов + 500 МБ файлов"
     )
     builder = InlineKeyboardBuilder()
     for key, plan in PLANS.items():
-        builder.button(text=f"Выбрать {plan['name']} — {plan['price']}", callback_data=f"req_{key}_{uid}")
-    builder.adjust(1)
-    await message.answer("👇 Выбери тариф:", reply_markup=builder.as_markup())
+        builder.button(
+            text=f"⭐️ {plan['name']} — {plan['stars']} Stars",
+            callback_data=f"buy_{key}"
+        )
+        builder.button(
+            text=f"🤝 {plan['name']} — тестовый доступ",
+            callback_data=f"req_{key}_{uid}"
+        )
+    builder.adjust(2)
+    await message.answer("👇 Выбери тариф и способ:", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data.startswith("req_"))
 async def request_plan(callback: CallbackQuery):
@@ -280,21 +300,64 @@ async def request_plan(callback: CallbackQuery):
     plan = PLANS.get(plan_key)
     if not plan:
         return
-    await callback.message.edit_text(f"✅ Заявка на тариф «{plan['name']}» отправлена!\nАдминистратор свяжется с тобой.")
+    await callback.message.edit_text(
+        f"✅ Заявка на тестовый доступ «{plan['name']}» отправлена!\n"
+        f"Администратор свяжется с тобой."
+    )
     builder = InlineKeyboardBuilder()
     builder.button(text=f"✅ Одобрить «{plan['name']}»", callback_data=f"approve_{uid}_{plan_key}")
     builder.button(text="❌ Отклонить", callback_data=f"reject_{uid}")
     builder.adjust(1)
     await bot.send_message(
         ADMIN_ID,
-        f"💰 Новая заявка на подписку!\n"
+        f"🤝 Заявка на тестовый доступ!\n"
         f"👤 @{username}\n"
         f"📝 Имя: {full_name}\n"
         f"🆔 ID: {uid}\n"
-        f"📦 Тариф: {plan['name']} — {plan['price']}",
+        f"📦 Тариф: {plan['name']}",
         reply_markup=builder.as_markup()
     )
     await callback.answer()
+    await bot.send_invoice(
+        chat_id=callback.from_user.id,
+        title=f"Подписка «{plan['name']}»",
+        description=f"{plan['requests'] if plan['requests'] < 9999 else 'Безлимит'} запросов + {plan['file_mb_total']} МБ файлов на 30 дней",
+        payload=f"sub_{plan_key}",
+        currency="XTR",
+        prices=[LabeledPrice(label=plan['name'], amount=plan['stars'])]
+    )
+
+@dp.pre_checkout_query()
+async def pre_checkout(query: PreCheckoutQuery):
+    await query.answer(ok=True)
+
+@dp.message(F.successful_payment)
+async def successful_payment(message: Message):
+    uid = message.from_user.id
+    username = message.from_user.username or "без username"
+    payload = message.successful_payment.invoice_payload
+    plan_key = payload.replace("sub_", "")
+    plan = PLANS.get(plan_key, PLANS["basic"])
+
+    new_until = await activate_subscription(uid, plan_key)
+    until_str = new_until.strftime('%d.%m.%Y %H:%M')
+    req_limit = "∞" if plan["requests"] > 9999 else str(plan["requests"])
+
+    await message.answer(
+        f"✅ Оплата прошла успешно!\n"
+        f"📦 Тариф: {plan['name']}\n"
+        f"📨 Запросов в месяц: {req_limit}\n"
+        f"📁 Файлов в месяц: {plan['file_mb_total']} МБ\n"
+        f"📅 Действует до: {until_str}\n\n"
+        f"Пользуйтесь без ограничений!"
+    )
+    await bot.send_message(
+        ADMIN_ID,
+        f"💰 Новая оплата через Stars!\n"
+        f"👤 @{username}\n"
+        f"🆔 ID: {uid}\n"
+        f"📦 Тариф: {plan['name']} — {plan['stars']} ⭐️"
+    )
 
 @dp.callback_query(F.data.startswith("approve_"))
 async def approve(callback: CallbackQuery):
@@ -311,16 +374,7 @@ async def approve(callback: CallbackQuery):
         await callback.answer(f"Ошибка: {e}")
         return
     plan = PLANS.get(plan_key, PLANS["basic"])
-    row = await db.fetchrow("SELECT subscription_until, is_paid FROM users WHERE user_id = $1", uid)
-    if row and row["is_paid"] and row["subscription_until"] and row["subscription_until"] > datetime.utcnow():
-        new_until = row["subscription_until"] + timedelta(days=30)
-    else:
-        new_until = datetime.utcnow() + timedelta(days=30)
-    await db.execute("""
-        UPDATE users SET is_paid = TRUE, subscription_until = $1, plan = $2,
-        requests_used = 0, file_mb_used = 0, period_start = $3
-        WHERE user_id = $4
-    """, new_until, plan_key, datetime.utcnow(), uid)
+    new_until = await activate_subscription(uid, plan_key)
     until_str = new_until.strftime('%d.%m.%Y %H:%M')
     req_limit = "∞" if plan["requests"] > 9999 else str(plan["requests"])
     await bot.send_message(uid,
@@ -354,7 +408,7 @@ async def stats(message: Message):
     total_requests = await db.fetchval("SELECT SUM(total_requests) FROM users")
     top_users = await db.fetch("SELECT username, total_requests FROM users ORDER BY total_requests DESC LIMIT 5")
     top_text = "\n".join([f"@{r['username']} — {r['total_requests']} запросов" for r in top_users])
-    revenue = (basic or 0) * 299 + (standard or 0) * 599 + (pro or 0) * 999
+    stars_revenue = (basic or 0) * 250 + (standard or 0) * 500 + (pro or 0) * 830
     await message.answer(
         f"📊 Статистика бота\n\n"
         f"👥 Всего пользователей: {total_users}\n"
@@ -362,7 +416,7 @@ async def stats(message: Message):
         f"  🔹 Базовый: {basic}\n"
         f"  🔸 Стандарт: {standard}\n"
         f"  💎 Про: {pro}\n"
-        f"💵 Выручка/мес.: ~{revenue} руб.\n"
+        f"⭐️ Stars/мес.: ~{stars_revenue}\n"
         f"📨 Всего запросов: {total_requests or 0}\n\n"
         f"🏆 Топ-5 пользователей:\n{top_text}"
     )
