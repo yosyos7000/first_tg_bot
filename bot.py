@@ -291,9 +291,23 @@ async def request_plan(callback: CallbackQuery):
 async def approve(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         return
+    print(f"APPROVE DEBUG: {callback.data}")
     parts = callback.data.split("_")
-    uid = int(parts[1])
-    plan_key = parts[2] if len(parts) > 2 else "basic"
+    print(f"PARTS: {parts}")
+    
+    if len(parts) < 3:
+        await callback.answer("Ошибка: старый формат кнопки")
+        return
+    
+    try:
+        uid = int(parts[1])
+        plan_key = parts[2]
+    except Exception as e:
+        print(f"PARSE ERROR: {e}")
+        await callback.answer(f"Ошибка парсинга: {e}")
+        return
+
+    print(f"UID: {uid}, PLAN: {plan_key}")
     plan = PLANS.get(plan_key, PLANS["basic"])
     row = await db.fetchrow("SELECT subscription_until, is_paid FROM users WHERE user_id = $1", uid)
     if row and row["is_paid"] and row["subscription_until"] and row["subscription_until"] > datetime.utcnow():
@@ -305,6 +319,7 @@ async def approve(callback: CallbackQuery):
         requests_used = 0, file_mb_used = 0, period_start = $3
         WHERE user_id = $4
     """, new_until, plan_key, datetime.utcnow(), uid)
+    print(f"DB UPDATED for {uid}")
     until_str = new_until.strftime('%d.%m.%Y %H:%M')
     req_limit = "∞" if plan["requests"] > 9999 else str(plan["requests"])
     await bot.send_message(uid,
@@ -316,7 +331,6 @@ async def approve(callback: CallbackQuery):
         f"Пользуйтесь без ограничений!")
     await callback.message.edit_text(callback.message.text + f"\n\n✅ Одобрено: {plan['name']} до {until_str}")
     await callback.answer("Подписка активирована!")
-
 @dp.callback_query(F.data.startswith("reject_"))
 async def reject(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
