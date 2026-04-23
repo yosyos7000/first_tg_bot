@@ -212,6 +212,7 @@ async def activate_subscription(user_id, plan_key):
     return new_until
 
 async def fetch_and_post():
+    post_count = 0
     for url in RSS_SOURCES:
         try:
             feed = feedparser.parse(url)
@@ -220,10 +221,28 @@ async def fetch_and_post():
                 if h in posted_hashes:
                     continue
                 posted_hashes.add(h)
+                post_count += 1
+
+                # Ищем картинку в записи
+                image_url = None
+                if hasattr(entry, 'media_content') and entry.media_content:
+                    image_url = entry.media_content[0].get('url')
+                elif hasattr(entry, 'enclosures') and entry.enclosures:
+                    for enc in entry.enclosures:
+                        if enc.get('type', '').startswith('image/'):
+                            image_url = enc.get('href')
+                            break
+                elif hasattr(entry, 'links'):
+                    for link in entry.links:
+                        if link.get('type', '').startswith('image/'):
+                            image_url = link.get('href')
+                            break
+
                 prompt = (
-                    f"Перепиши эту новость для Telegram-канала 'Навигатор предпринимателя' "
-                    f"(аудитория — предприниматели МСП). Коротко, по делу, добавь подходящий эмодзи и хештег. "
-                    f"Не более 5 предложений.\n\n"
+                    f"Перепиши эту новость для Telegram-канала о бизнесе и налогах. "
+                    f"Аудитория — предприниматели МСП. "
+                    f"Требования: без смайликов и эмодзи, только текст. "
+                    f"Добавь один хештег в конце. Не более 4 предложений.\n\n"
                     f"Заголовок: {entry.title}\n"
                     f"Текст: {entry.get('summary', '')[:1000]}"
                 )
@@ -235,15 +254,34 @@ async def fetch_and_post():
                 text = response.content[0].text
                 text = re.sub(r'\*\*?(.*?)\*\*?', r'\1', text)
                 text = re.sub(r'#{1,6}\s?', '', text)
-                await bot.send_message(CHANNEL_ID, text)
+                text += f"\n\nИсточник: {entry.link}"
+                text += f"\n@probiznav"
+
+                # Каждый 4-5 пост с картинкой
+                send_with_image = (post_count % 4 == 0) and image_url
+
+                try:
+                    if send_with_image:
+                        await bot.send_photo(
+                            CHANNEL_ID,
+                            photo=image_url,
+                            caption=text
+                        )
+                    else:
+                        await bot.send_message(CHANNEL_ID, text, disable_web_page_preview=False)
+                except Exception:
+                    await bot.send_message(CHANNEL_ID, text)
+
                 await asyncio.sleep(10)
         except Exception as e:
             print(f"RSS error {url}: {e}")
-
+            
 async def scheduler():
+    last_posted_hour = -1
     while True:
         now = datetime.utcnow()
-        if now.hour == 6 and now.minute == 0:
+        if now.hour != last_posted_hour:
+            last_posted_hour = now.hour
             await fetch_and_post()
         await asyncio.sleep(60)
 
