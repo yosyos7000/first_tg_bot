@@ -312,13 +312,24 @@ async def fetch_and_post():
         except Exception as e:
             print(f"Site error {site_url}: {e}")
 async def scheduler():
-    last_posted_hour = -1
+    import random
     while True:
         now = datetime.utcnow()
-        if now.hour != last_posted_hour:
-            last_posted_hour = now.hour
-            await fetch_and_post()
-        await asyncio.sleep(60)
+        # Московское время = UTC + 3
+        msk_hour = (now.hour + 3) % 24
+
+        if 8 <= msk_hour < 24:
+            # Случайная задержка от 45 до 75 минут
+            wait_minutes = random.randint(45, 75)
+            await asyncio.sleep(wait_minutes * 60)
+            # Проверяем снова что ещё в рабочем времени
+            now = datetime.utcnow()
+            msk_hour = (now.hour + 3) % 24
+            if 8 <= msk_hour < 24:
+                await fetch_and_post()
+        else:
+            # Ночью ждём до 8:00 МСК
+            await asyncio.sleep(600)
 
 @dp.message(F.text == "/start")
 async def start(message: Message):
