@@ -5,7 +5,6 @@ import asyncpg
 import aiohttp
 import base64
 import hashlib
-import feedparser
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery
@@ -21,12 +20,6 @@ ADMIN_ID = 416065237
 FREE_LIMIT = 5
 MAX_HISTORY = 10
 CHANNEL_ID = "@probiznav"
-
-RSS_SOURCES = [
-    "https://www.klerk.ru/rss/",
-    "https://www.consultant.ru/rss/hotdocs.xml",
-    "https://msp.gov.ru/rss/news.xml",
-]
 
 PLANS = {
     "basic":    {"name": "Базовый",   "price": "299 руб./мес.",  "stars": 250,  "requests": 200,  "file_mb_total": 50,  "file_mb_single": 10},
@@ -143,25 +136,17 @@ async def check_limits(user_id, username, file_mb=0):
         return True, None
     row = await get_user(user_id, username)
     plan_key = row["plan"] or "free"
-
     if not row["is_paid"]:
         today = datetime.utcnow().date()
         reset_date = row["free_reset_date"] if row["free_reset_date"] else None
         if reset_date != today:
-            await db.execute(
-                "UPDATE users SET free_used = 0, free_reset_date = $1 WHERE user_id = $2",
-                today, user_id
-            )
+            await db.execute("UPDATE users SET free_used = 0, free_reset_date = $1 WHERE user_id = $2", today, user_id)
             free_used = 0
         else:
             free_used = row["free_used"]
         if free_used >= FREE_LIMIT:
-            return False, (
-                f"На сегодня бесплатные запросы закончились ({FREE_LIMIT}/день).\n"
-                "Возвращайся завтра или напиши /subscribe для безлимитного доступа."
-            )
+            return False, (f"На сегодня бесплатные запросы закончились ({FREE_LIMIT}/день).\nВозвращайся завтра или напиши /subscribe для безлимитного доступа.")
         return True, None
-
     plan = PLANS.get(plan_key, PLANS["basic"])
     if row["requests_used"] >= plan["requests"]:
         return False, f"Лимит запросов на этот месяц исчерпан ({plan['requests']} запросов).\nНапиши /subscribe для смены тарифа."
@@ -179,10 +164,8 @@ async def increment_usage(user_id, file_mb=0):
         await db.execute("UPDATE users SET free_used = free_used + 1, total_requests = total_requests + 1 WHERE user_id = $1", user_id)
     else:
         await db.execute("""
-            UPDATE users SET
-                requests_used = requests_used + 1,
-                total_requests = total_requests + 1,
-                file_mb_used = file_mb_used + $1
+            UPDATE users SET requests_used = requests_used + 1,
+            total_requests = total_requests + 1, file_mb_used = file_mb_used + $1
             WHERE user_id = $2
         """, file_mb, user_id)
 
@@ -206,73 +189,118 @@ async def activate_subscription(user_id, plan_key):
         new_until = datetime.utcnow() + timedelta(days=30)
     await db.execute("""
         UPDATE users SET is_paid = TRUE, subscription_until = $1, plan = $2,
-        requests_used = 0, file_mb_used = 0, period_start = $3
-        WHERE user_id = $4
+        requests_used = 0, file_mb_used = 0, period_start = $3 WHERE user_id = $4
     """, new_until, plan_key, datetime.utcnow(), user_id)
     return new_until
 
+async def parse_site(url):
+    try:
+        from bs4 import BeautifulSoup
+        from urllib.parse import urljoin
+        async with aiohttp.ClientSession() as session:
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    return []
+                html = await resp.text()
+        soup = BeautifulSoup(html, 'html.parser')
+        for tag in soup(['script', 'style', 'nav', 'footer', 'header']):
+            tag.decompose()
+        articles = []
+        for a in soup.find_all('a', href=True):
+            title = a.get_text(strip=True)
+            href = a['href']
+            if len(title) > 30 and len(title) < 200:
+                if not href.startswith('http'):
+                    href = urljoin(url, href)
+                articles.append({"title": title, "link": href})
+        seen = set()
+        unique = []
+        for a in articles:
+            if a['link'] not in seen:
+                seen.add(a['link'])
+                unique.append(a)
+        return unique[:5]
+    except Exception as e:
+        print(f"Parse error {url}: {e}")
+        return []
+
+async def get_article_text(url):
+    try:
+        from bs4 import BeautifulSoup
+        async with aiohttp.ClientSession() as session:
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    return None
+                html = await resp.text()
+        soup = BeautifulSoup(html, 'html.parser')
+        for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
+            tag.decompose()
+        for selector in ['article', '.article-body', '.content', 'main', '.text']:
+            block = soup.select_one(selector)
+            if block:
+                return block.get_text(separator=' ', strip=True)[:3000]
+        return soup.get_text(separator=' ', strip=True)[:3000]
+    except Exception as e:
+        print(f"Article error {url}: {e}")
+        return None
+
+async def rewrite_and_post(title, text, link):
+    prompt = (
+        f"Перепиши эту новость для Telegram-канала о бизнесе и налогах. "
+        f"Аудитория — предприниматели МСП. "
+        f"Требования: без смайликов и эмодзи, только текст. "
+        f"Добавь один хештег в конце. Не более 4 предложений.\n\n"
+        f"Заголовок: {title}\n"
+        f"Текст: {text[:1500]}"
+    )
+    response = ai.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=500,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    post_text = response.content[0].text
+    post_text = re.sub(r'\*\*?(.*?)\*\*?', r'\1', post_text)
+    post_text = re.sub(r'#{1,6}\s?', '', post_text)
+    post_text += f'\n\n<a href="{link}">Читать источник</a>'
+    post_text += f"\n@probiznav"
+    await bot.send_message(CHANNEL_ID, post_text, parse_mode="HTML", disable_web_page_preview=True)
+
 async def fetch_and_post():
-    post_count = 0
-    for url in RSS_SOURCES:
+    sites = [
+        "https://www.rbc.ru/economics/",
+        "https://www.kommersant.ru/finance",
+        "https://www.vedomosti.ru/economics",
+        "https://www.forbes.ru/finansy",
+        "https://expert.ru/expert/",
+        "https://www.dp.ru/a/economics/",
+        "https://secretmag.ru/news/",
+        "https://www.banki.ru/news/",
+        "https://journal.tinkoff.ru/news/",
+        "https://sovcombank.ru/blog",
+        "https://nalog-nalog.ru/novosti/",
+        "https://cbr.ru/press/event/",
+        "https://minfin.gov.ru/ru/press-center/news/",
+        "https://government.ru/news/",
+        "https://mos.ru/news/",
+    ]
+    for site_url in sites:
         try:
-            feed = feedparser.parse(url)
-            for entry in feed.entries[:1]:
-                h = hashlib.md5(entry.link.encode()).hexdigest()
+            articles = await parse_site(site_url)
+            for article in articles[:1]:
+                h = hashlib.md5(article['link'].encode()).hexdigest()
                 if h in posted_hashes:
                     continue
                 posted_hashes.add(h)
-                post_count += 1
-
-                image_url = None
-                if hasattr(entry, 'media_content') and entry.media_content:
-                    image_url = entry.media_content[0].get('url')
-                elif hasattr(entry, 'enclosures') and entry.enclosures:
-                    for enc in entry.enclosures:
-                        if enc.get('type', '').startswith('image/'):
-                            image_url = enc.get('href')
-                            break
-                elif hasattr(entry, 'links'):
-                    for link in entry.links:
-                        if link.get('type', '').startswith('image/'):
-                            image_url = link.get('href')
-                            break
-
-                prompt = (
-                    f"Перепиши эту новость для Telegram-канала о бизнесе и налогах. "
-                    f"Аудитория — предприниматели МСП. "
-                    f"Требования: без смайликов и эмодзи, только текст. "
-                    f"Добавь один хештег в конце. Не более 4 предложений.\n\n"
-                    f"Заголовок: {entry.title}\n"
-                    f"Текст: {entry.get('summary', '')[:1000]}"
-                )
-                response = ai.messages.create(
-                    model="claude-sonnet-4-5",
-                    max_tokens=500,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                text = response.content[0].text
-                text = re.sub(r'\*\*?(.*?)\*\*?', r'\1', text)
-                text = re.sub(r'#{1,6}\s?', '', text)
-                text += f'\n\n<a href="{entry.link}">Читать источник</a>'
-                text += f"\n@probiznav"
-
-                send_with_image = (post_count % 4 == 0) and image_url
-                try:
-                    if send_with_image:
-                        await bot.send_photo(
-                            CHANNEL_ID,
-                            photo=image_url,
-                            caption=text,
-                            parse_mode="HTML"
-                        )
-                    else:
-                        await bot.send_message(CHANNEL_ID, text, parse_mode="HTML", disable_web_page_preview=True)
-                except Exception:
-                    await bot.send_message(CHANNEL_ID, text, parse_mode="HTML")
-
-                await asyncio.sleep(10)
+                text = await get_article_text(article['link'])
+                if not text or len(text) < 100:
+                    continue
+                await rewrite_and_post(article['title'], text, article['link'])
+                await asyncio.sleep(15)
+                break
         except Exception as e:
-            print(f"RSS error {url}: {e}")
+            print(f"Site error {site_url}: {e}")
 
 async def scheduler():
     last_posted_hour = -1
@@ -327,7 +355,6 @@ async def profile(message: Message):
     row = await get_user(uid, username)
     role_name = ROLES.get(user_roles.get(uid, "chat"), ROLES["chat"])["name"]
     plan_key = row["plan"] or "free"
-
     if row["is_paid"] and row["subscription_until"]:
         plan = PLANS.get(plan_key, PLANS["basic"])
         req_limit = "∞" if plan["requests"] > 9999 else str(plan["requests"])
@@ -341,7 +368,6 @@ async def profile(message: Message):
         sub_text = f"❌ Истекла: {row['subscription_until'].strftime('%d.%m.%Y %H:%M')}"
     else:
         sub_text = f"🆓 Бесплатный план ({FREE_LIMIT - min(row['free_used'], FREE_LIMIT)} запросов осталось сегодня)"
-
     await message.answer(
         f"👤 Профиль\n\n"
         f"🤖 Модель: Claude Sonnet\n"
@@ -367,10 +393,7 @@ async def subscribe(message: Message):
     )
     builder = InlineKeyboardBuilder()
     for key, plan in PLANS.items():
-        builder.button(
-            text=f"{plan['name']} — {plan['price']}",
-            callback_data=f"buy_{key}"
-        )
+        builder.button(text=f"{plan['name']} — {plan['price']}", callback_data=f"buy_{key}")
     builder.button(text="🤝 Тестовый доступ", callback_data=f"test_{uid}")
     builder.adjust(1)
     await message.answer("👇 Выбери тариф:", reply_markup=builder.as_markup())
@@ -520,6 +543,23 @@ async def post_now(message: Message):
     await message.answer("🔄 Запускаю публикацию новостей...")
     await fetch_and_post()
     await message.answer("✅ Готово! Проверяй канал @probiznav")
+
+@dp.message(F.text.startswith("/post "))
+async def manual_post(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    url = message.text.replace("/post ", "").strip()
+    await message.answer("🔄 Читаю статью...")
+    try:
+        text = await get_article_text(url)
+        if not text or len(text) < 100:
+            await message.answer("❌ Не удалось прочитать статью. Попробуй другую ссылку.")
+            return
+        title = url.split("/")[-2] or "Новость"
+        await rewrite_and_post(title, text, url)
+        await message.answer("✅ Опубликовано в канал!")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
 
 async def handle_with_access(message: Message, content, file_mb=0):
     uid = message.from_user.id
