@@ -4,6 +4,8 @@ import re
 import asyncpg
 import aiohttp
 import base64
+import hashlib
+import feedparser
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery
@@ -18,6 +20,13 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 ADMIN_ID = 416065237
 FREE_LIMIT = 5
 MAX_HISTORY = 10
+CHANNEL_ID = "@probiznav"
+
+RSS_SOURCES = [
+    "https://www.klerk.ru/rss/",
+    "https://www.consultant.ru/rss/hotdocs.xml",
+    "https://msp.gov.ru/rss/news.xml",
+]
 
 PLANS = {
     "basic":    {"name": "Базовый",   "price": "299 руб./мес.",  "stars": 250,  "requests": 200,  "file_mb_total": 50,  "file_mb_single": 10},
@@ -31,6 +40,7 @@ ai = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 db = None
 conversations = {}
 user_roles = {}
+posted_hashes = set()
 
 ROLES = {
     "business":   {"name": "🧑‍💼 Бизнес-ассистент", "prompt": "Ты профессиональный бизнес-ассистент. Помогаешь с анализом данных, составлением документов, деловой перепиской, стратегическими решениями и бизнес-задачами. Отвечай чётко, структурированно и профессионально."},
@@ -201,6 +211,42 @@ async def activate_subscription(user_id, plan_key):
     """, new_until, plan_key, datetime.utcnow(), user_id)
     return new_until
 
+async def fetch_and_post():
+    for url in RSS_SOURCES:
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:2]:
+                h = hashlib.md5(entry.link.encode()).hexdigest()
+                if h in posted_hashes:
+                    continue
+                posted_hashes.add(h)
+                prompt = (
+                    f"Перепиши эту новость для Telegram-канала 'Навигатор предпринимателя' "
+                    f"(аудитория — предприниматели МСП). Коротко, по делу, добавь подходящий эмодзи и хештег. "
+                    f"Не более 5 предложений.\n\n"
+                    f"Заголовок: {entry.title}\n"
+                    f"Текст: {entry.get('summary', '')[:1000]}"
+                )
+                response = ai.messages.create(
+                    model="claude-sonnet-4-5",
+                    max_tokens=500,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                text = response.content[0].text
+                text = re.sub(r'\*\*?(.*?)\*\*?', r'\1', text)
+                text = re.sub(r'#{1,6}\s?', '', text)
+                await bot.send_message(CHANNEL_ID, text)
+                await asyncio.sleep(10)
+        except Exception as e:
+            print(f"RSS error {url}: {e}")
+
+async def scheduler():
+    while True:
+        now = datetime.utcnow()
+        if now.hour == 6 and now.minute == 0:
+            await fetch_and_post()
+        await asyncio.sleep(60)
+
 @dp.message(F.text == "/start")
 async def start(message: Message):
     conversations.pop(message.from_user.id, None)
@@ -267,12 +313,13 @@ async def profile(message: Message):
         f"📋 Подписка: {sub_text}\n"
         f"📊 Всего запросов за всё время: {row['total_requests']}"
     )
-    
+
 async def message_answer_safe(callback, text):
     try:
         await callback.message.edit_text(text)
     except:
         await callback.message.answer(text)
+
 @dp.message(F.text == "/subscribe")
 async def subscribe(message: Message):
     uid = message.from_user.id
@@ -328,7 +375,7 @@ async def buy_plan(callback: CallbackQuery):
         currency="XTR",
         prices=[LabeledPrice(label=plan['name'], amount=plan['stars'])]
     )
-    
+
 @dp.pre_checkout_query()
 async def pre_checkout(query: PreCheckoutQuery):
     await query.answer(ok=True)
@@ -340,11 +387,9 @@ async def successful_payment(message: Message):
     payload = message.successful_payment.invoice_payload
     plan_key = payload.replace("sub_", "")
     plan = PLANS.get(plan_key, PLANS["basic"])
-
     new_until = await activate_subscription(uid, plan_key)
     until_str = new_until.strftime('%d.%m.%Y %H:%M')
     req_limit = "∞" if plan["requests"] > 9999 else str(plan["requests"])
-
     await message.answer(
         f"✅ Оплата прошла успешно!\n"
         f"📦 Тариф: {plan['name']}\n"
@@ -540,6 +585,7 @@ async def handle(message: Message):
 
 async def main():
     await init_db()
+    asyncio.create_task(scheduler())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
