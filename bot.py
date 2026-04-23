@@ -269,6 +269,7 @@ async def request_plan(callback: CallbackQuery):
     plan_key = parts[1]
     uid = int(parts[2])
     username = callback.from_user.username or "без username"
+    full_name = callback.from_user.full_name or "без имени"
     plan = PLANS.get(plan_key)
     if not plan:
         return
@@ -281,6 +282,7 @@ async def request_plan(callback: CallbackQuery):
         ADMIN_ID,
         f"💰 Новая заявка на подписку!\n"
         f"👤 @{username}\n"
+        f"📝 Имя: {full_name}\n"
         f"🆔 ID: {uid}\n"
         f"📦 Тариф: {plan['name']} — {plan['price']}",
         reply_markup=builder.as_markup()
