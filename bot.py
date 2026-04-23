@@ -114,6 +114,12 @@ async def init_db():
         except:
             pass
     await db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS free_reset_date DATE")
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS posted_links (
+            hash TEXT PRIMARY KEY,
+            posted_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
 
 async def get_user(user_id, username):
     row = await db.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
@@ -683,10 +689,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-await db.execute("""
-        CREATE TABLE IF NOT EXISTS posted_links (
-            hash TEXT PRIMARY KEY,
-            posted_at TIMESTAMP DEFAULT NOW()
-        )
-    """)
