@@ -477,6 +477,16 @@ async def clear(message: Message):
 async def support(message: Message):
     await message.answer("🆘 Поддержка\n\nЕсли у вас возникли вопросы — напишите администратору:\n@polyakovkonst")
 
+@dp.message(F.text == "/postnow")
+async def post_now(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await message.answer("🔄 Запускаю публикацию новостей...")
+    await fetch_and_post()
+    await message.answer("✅ Готово! Проверяй канал @probiznav")
+async def support(message: Message):
+    await message.answer("🆘 Поддержка\n\nЕсли у вас возникли вопросы — напишите администратору:\n@polyakovkonst")
+
 async def handle_with_access(message: Message, content, file_mb=0):
     uid = message.from_user.id
     username = message.from_user.username or "без username"
