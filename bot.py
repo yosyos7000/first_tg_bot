@@ -545,11 +545,15 @@ async def post_now(message: Message):
     await fetch_and_post()
     await message.answer("✅ Готово! Проверяй канал @probiznav")
 
-@dp.message(F.text.startswith("/post "))
+@dp.message(F.text.startswith("/post"))
 async def manual_post(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
-    url = message.text.replace("/post ", "").strip()
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Укажи ссылку: /post https://ссылка")
+        return
+    url = parts[1].strip()
     await message.answer("🔄 Читаю статью...")
     try:
         text = await get_article_text(url)
