@@ -292,17 +292,19 @@ async def fetch_and_post():
             articles = await parse_site(site_url)
             for article in articles[:3]:
                 h = hashlib.md5(article['link'].encode()).hexdigest()
-                if h in posted_hashes:
+                # Проверяем в базе данных
+                exists = await db.fetchval("SELECT hash FROM posted_links WHERE hash = $1", h)
+                if exists:
                     continue
-                posted_hashes.add(h)
+                # Сохраняем в базу
+                await db.execute("INSERT INTO posted_links (hash) VALUES ($1) ON CONFLICT DO NOTHING", h)
                 text = await get_article_text(article['link'])
                 if not text or len(text) < 100:
                     continue
                 await rewrite_and_post(article['title'], text, article['link'])
-                return  # Публикуем только 1 новость и выходим
+                return
         except Exception as e:
             print(f"Site error {site_url}: {e}")
-
 async def scheduler():
     last_posted_hour = -1
     while True:
@@ -681,3 +683,10 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+await db.execute("""
+        CREATE TABLE IF NOT EXISTS posted_links (
+            hash TEXT PRIMARY KEY,
+            posted_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
