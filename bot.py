@@ -251,7 +251,7 @@ async def rewrite_and_post(title, text, link):
         f"Перепиши эту новость для Telegram-канала о бизнесе и налогах. "
         f"Аудитория — предприниматели МСП. "
         f"Требования: без смайликов и эмодзи, только текст. "
-        f"Добавь один хештег в конце. Не более 4 предложений.\n\n"
+        f"Добавь один хештег в конце через # (например #налоги или #МСП). Не более 4 предложений.\n\n"
         f"Заголовок: {title}\n"
         f"Текст: {text[:1500]}"
     )
@@ -268,6 +268,7 @@ async def rewrite_and_post(title, text, link):
     await bot.send_message(CHANNEL_ID, post_text, parse_mode="HTML", disable_web_page_preview=True)
 
 async def fetch_and_post():
+    import random
     sites = [
         "https://www.rbc.ru/economics/",
         "https://www.kommersant.ru/finance",
@@ -285,10 +286,11 @@ async def fetch_and_post():
         "https://government.ru/news/",
         "https://mos.ru/news/",
     ]
+    random.shuffle(sites)
     for site_url in sites:
         try:
             articles = await parse_site(site_url)
-            for article in articles[:1]:
+            for article in articles[:3]:
                 h = hashlib.md5(article['link'].encode()).hexdigest()
                 if h in posted_hashes:
                     continue
@@ -297,8 +299,7 @@ async def fetch_and_post():
                 if not text or len(text) < 100:
                     continue
                 await rewrite_and_post(article['title'], text, article['link'])
-                await asyncio.sleep(15)
-                break
+                return  # Публикуем только 1 новость и выходим
         except Exception as e:
             print(f"Site error {site_url}: {e}")
 
