@@ -4,4 +4,4 @@ asyncpg
 aiohttp
 python-docx
 openpyxl
-feedparser
+beautifulsoup4
