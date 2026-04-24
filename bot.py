@@ -362,7 +362,7 @@ async def pick_best_candidate(candidates):
     response = ai.messages.create(
         model="claude-sonnet-4-5",
         max_tokens=10,
-        messages=[{"role": "user", "content": prompt}]
+        messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}]
     )
     try:
         idx = int(response.content[0].text.strip()) - 1
