@@ -36,6 +36,7 @@ conversations = {}
 user_roles = {}
 posted_hashes = set()
 pending_edits = {}
+publish_queue = []
 
 ROLES = {
     "business":   {"name": "🧑‍💼 Бизнес-ассистент", "prompt": "Ты профессиональный бизнес-ассистент. Помогаешь с анализом данных, составлением документов, деловой перепиской, стратегическими решениями и бизнес-задачами. Отвечай чётко, структурированно и профессионально."},
@@ -92,6 +93,14 @@ HELP_TEXT = """📖 Как пользоваться ботом
 async def init_db():
     global db
     db = await asyncpg.connect(DATABASE_URL)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS conversations (
+            user_id BIGINT,
+            role TEXT,
+            content TEXT,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
     await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
@@ -355,48 +364,67 @@ async def collect_candidates():
             print(f"Collect error {site_url}: {e}")
     return candidates
 
-async def pick_best_candidate(candidates):
+async def pick_top_candidates(candidates, n=3):
     if not candidates:
-        return None
-    if len(candidates) == 1:
-        return candidates[0]
-    titles = "\n".join([f"{i+1}. {c['title']}" for i, c in enumerate(candidates[:15])])
+        return []
+    if len(candidates) <= n:
+        return candidates
+    titles = "\n".join([f"{i+1}. {c['title']}" for i, c in enumerate(candidates[:20])])
     prompt = (
         f"Ты редактор Telegram-канала для предпринимателей МСП. "
-        f"Выбери ОДНУ самую важную и интересную новость из списка ниже. "
+        f"Выбери {n} самых важных и интересных новости из списка ниже. "
         f"Критерии: налоги, льготы, законодательство, банки, господдержка МСП. "
-        f"Ответь ТОЛЬКО цифрой — номером выбранной новости.\n\n"
+        f"Ответь ТОЛЬКО номерами через запятую, например: 2, 5, 8\n\n"
         f"{titles}"
     )
     response = ai.messages.create(
         model="claude-sonnet-4-5",
-        max_tokens=10,
+        max_tokens=20,
         messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}]
     )
     try:
-        idx = int(response.content[0].text.strip()) - 1
-        if 0 <= idx < len(candidates):
-            return candidates[idx]
+        nums = [int(x.strip()) - 1 for x in response.content[0].text.strip().split(",")]
+        result = [candidates[i] for i in nums if 0 <= i < len(candidates)]
+        return result[:n]
     except:
-        pass
-    return candidates[0]
+        return candidates[:n]
 
 async def fetch_and_post():
     candidates = await collect_candidates()
     if not candidates:
         print("Нет новых кандидатов")
         return
-    best = await pick_best_candidate(candidates)
-    if not best:
+    top3 = await pick_top_candidates(candidates, n=3)
+    if not top3:
         return
-    text = await get_article_text(best['link'])
-    if not text or len(text) < 100:
-        return
-    draft = await prepare_draft(best['title'], text, best['link'])
-    if not draft:
-        return
-    draft_id = await save_draft(best['title'], draft, best['link'])
-    await send_for_approval(draft_id, draft, best['link'])
+    for candidate in top3:
+        text = await get_article_text(candidate['link'])
+        if not text or len(text) < 100:
+            continue
+        draft = await prepare_draft(candidate['title'], text, candidate['link'])
+        if not draft:
+            continue
+        draft_id = await save_draft(candidate['title'], draft, candidate['link'])
+        await send_for_approval(draft_id, draft, candidate['link'])
+        await asyncio.sleep(2)
+
+async def process_publish_queue():
+    while True:
+        if publish_queue:
+            draft_id = publish_queue.pop(0)
+            row = await db.fetchrow("SELECT * FROM drafts WHERE hash = $1", draft_id)
+            if row and row["status"] == "queued":
+                post_text = row["draft_text"]
+                post_text += f'\n\n<a href="{row["link"]}">Читать источник</a>'
+                post_text += f"\n@probiznav"
+                try:
+                    await bot.send_message(CHANNEL_ID, post_text, parse_mode="HTML", disable_web_page_preview=True)
+                    await db.execute("UPDATE drafts SET status = 'published' WHERE hash = $1", draft_id)
+                except Exception as e:
+                    print(f"Ошибка публикации: {e}")
+            if publish_queue:
+                await asyncio.sleep(20 * 60)
+        await asyncio.sleep(30)
 
 async def scheduler():
     import random
@@ -616,13 +644,23 @@ async def publish_draft(callback: CallbackQuery):
     if not row:
         await callback.answer("Черновик не найден")
         return
-    post_text = row["draft_text"]
-    post_text += f'\n\n<a href="{row["link"]}">Читать источник</a>'
-    post_text += f"\n@probiznav"
-    await bot.send_message(CHANNEL_ID, post_text, parse_mode="HTML", disable_web_page_preview=True)
-    await db.execute("UPDATE drafts SET status = 'published' WHERE hash = $1", draft_id)
-    await callback.message.edit_text(callback.message.text + "\n\n✅ Опубликовано!")
-    await callback.answer("Опубликовано в канал!")
+    if publish_queue:
+        publish_queue.append(draft_id)
+        await db.execute("UPDATE drafts SET status = 'queued' WHERE hash = $1", draft_id)
+        pos = len(publish_queue)
+        wait_min = (pos - 1) * 20
+        await callback.message.edit_text(
+            callback.message.text + f"\n\n⏳ Добавлено в очередь (публикация через ~{wait_min} мин.)"
+        )
+        await callback.answer("Добавлено в очередь!")
+    else:
+        post_text = row["draft_text"]
+        post_text += f'\n\n<a href="{row["link"]}">Читать источник</a>'
+        post_text += f"\n@probiznav"
+        await bot.send_message(CHANNEL_ID, post_text, parse_mode="HTML", disable_web_page_preview=True)
+        await db.execute("UPDATE drafts SET status = 'published' WHERE hash = $1", draft_id)
+        await callback.message.edit_text(callback.message.text + "\n\n✅ Опубликовано!")
+        await callback.answer("Опубликовано в канал!")
 
 @dp.callback_query(F.data.startswith("edit_"))
 async def edit_draft(callback: CallbackQuery):
@@ -693,7 +731,9 @@ async def stats(message: Message):
 
 @dp.message(F.text == "/clear")
 async def clear(message: Message):
-    conversations.pop(message.from_user.id, None)
+    uid = message.from_user.id
+    conversations.pop(uid, None)
+    await db.execute("DELETE FROM conversations WHERE user_id = $1", uid)
     await message.answer("🗑 История диалога очищена!\n\nЭто полезно когда хочешь начать новую тему с чистого листа.")
 
 @dp.message(F.text == "/support")
@@ -706,7 +746,7 @@ async def post_now(message: Message):
         return
     await message.answer("🔄 Запускаю публикацию новостей...")
     await fetch_and_post()
-    await message.answer("✅ Черновик отправлен в редакторский чат!")
+    await message.answer("✅ Черновики отправлены в редакторский чат!")
 
 @dp.message(F.text.startswith("/post"))
 async def manual_post(message: Message):
@@ -742,7 +782,16 @@ async def handle_with_access(message: Message, content, file_mb=0):
         return False
     await increment_usage(uid, file_mb)
     if uid not in conversations:
-        conversations[uid] = []
+        rows = await db.fetch(
+            "SELECT role, content FROM conversations WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2",
+            uid, MAX_HISTORY * 2
+        )
+        conversations[uid] = [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+    content_str = content if isinstance(content, str) else str(content)
+    await db.execute(
+        "INSERT INTO conversations (user_id, role, content) VALUES ($1, $2, $3)",
+        uid, "user", content_str
+    )
     conversations[uid].append({"role": "user", "content": content})
     if len(conversations[uid]) > MAX_HISTORY * 2:
         conversations[uid] = conversations[uid][-MAX_HISTORY * 2:]
@@ -767,6 +816,7 @@ async def handle_photo(message: Message):
     response = ai.messages.create(model="claude-sonnet-4-5", max_tokens=1500, system=get_system_prompt(uid), messages=conversations[uid])
     reply = response.content[0].text
     conversations[uid].append({"role": "assistant", "content": reply})
+    await db.execute("INSERT INTO conversations (user_id, role, content) VALUES ($1, $2, $3)", uid, "assistant", reply)
     reply = re.sub(r'\*\*?(.*?)\*\*?', r'\1', reply)
     reply = re.sub(r'#{1,6}\s?', '', reply)
     await message.answer(reply)
@@ -821,6 +871,7 @@ async def handle_document(message: Message):
     response = ai.messages.create(model="claude-sonnet-4-5", max_tokens=1500, system=get_system_prompt(uid), messages=conversations[uid])
     reply = response.content[0].text
     conversations[uid].append({"role": "assistant", "content": reply})
+    await db.execute("INSERT INTO conversations (user_id, role, content) VALUES ($1, $2, $3)", uid, "assistant", reply)
     reply = re.sub(r'\*\*?(.*?)\*\*?', r'\1', reply)
     reply = re.sub(r'#{1,6}\s?', '', reply)
     await message.answer(reply)
@@ -835,6 +886,7 @@ async def handle(message: Message):
     response = ai.messages.create(model="claude-sonnet-4-5", max_tokens=1500, system=get_system_prompt(uid), messages=conversations[uid])
     reply = response.content[0].text
     conversations[uid].append({"role": "assistant", "content": reply})
+    await db.execute("INSERT INTO conversations (user_id, role, content) VALUES ($1, $2, $3)", uid, "assistant", reply)
     reply = re.sub(r'\*\*?(.*?)\*\*?', r'\1', reply)
     reply = re.sub(r'#{1,6}\s?', '', reply)
     await message.answer(reply, reply_markup=ReplyKeyboardRemove())
@@ -842,6 +894,7 @@ async def handle(message: Message):
 async def main():
     await init_db()
     asyncio.create_task(scheduler())
+    asyncio.create_task(process_publish_queue())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
