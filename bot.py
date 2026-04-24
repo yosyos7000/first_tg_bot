@@ -310,7 +310,8 @@ async def rewrite_and_post(title, text, link):
     post_text += f"\n@probiznav"
     await bot.send_message(CHANNEL_ID, post_text, parse_mode="HTML", disable_web_page_preview=True)
 
-async def fetch_and_post():
+async def collect_candidates():
+    """Собирает кандидатов со всех сайтов"""
     import random
     sites = [
         "https://www.rbc.ru/economics/",
@@ -330,43 +331,92 @@ async def fetch_and_post():
         "https://government.ru/news/",
         "https://mos.ru/news/",
     ]
-    random.shuffle(sites)
+    candidates = []
     for site_url in sites:
         try:
             articles = await parse_site(site_url)
             for article in articles[:3]:
                 h = hashlib.md5(article['link'].encode()).hexdigest()
-                # Проверяем в базе данных
                 exists = await db.fetchval("SELECT hash FROM posted_links WHERE hash = $1", h)
-                if exists:
-                    continue
-                # Сохраняем в базу
-                await db.execute("INSERT INTO posted_links (hash) VALUES ($1) ON CONFLICT DO NOTHING", h)
-                text = await get_article_text(article['link'])
-                if not text or len(text) < 100:
-                    continue
-                await rewrite_and_post(article['title'], text, article['link'])
-                return
+                if not exists:
+                    candidates.append(article)
         except Exception as e:
-            print(f"Site error {site_url}: {e}")
+            print(f"Collect error {site_url}: {e}")
+    return candidates
+
+async def pick_best_candidate(candidates):
+    """Claude выбирает лучшую новость из кандидатов"""
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    titles = "\n".join([f"{i+1}. {c['title']}" for i, c in enumerate(candidates[:15])])
+    prompt = (
+        f"Ты редактор Telegram-канала для предпринимателей МСП. "
+        f"Выбери ОДНУ самую важную и интересную новость из списка ниже. "
+        f"Критерии: налоги, льготы, законодательство, банки, господдержка МСП. "
+        f"Ответь ТОЛЬКО цифрой — номером выбранной новости.\n\n"
+        f"{titles}"
+    )
+    response = ai.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=10,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    try:
+        idx = int(response.content[0].text.strip()) - 1
+        if 0 <= idx < len(candidates):
+            return candidates[idx]
+    except:
+        pass
+    return candidates[0]
+
+async def fetch_and_post():
+    """Собирает кандидатов, выбирает лучшего и публикует"""
+    candidates = await collect_candidates()
+    if not candidates:
+        print("Нет новых кандидатов")
+        return
+
+    best = await pick_best_candidate(candidates)
+    if not best:
+        return
+
+    h = hashlib.md5(best['link'].encode()).hexdigest()
+    await db.execute("INSERT INTO posted_links (hash) VALUES ($1) ON CONFLICT DO NOTHING", h)
+
+    text = await get_article_text(best['link'])
+    if not text or len(text) < 100:
+        return
+
+    await rewrite_and_post(best['title'], text, best['link'])
+
 async def scheduler():
     import random
+    # Сбор кандидатов каждые 30 минут
+    last_collect = 0
+    candidates_cache = []
+
     while True:
         now = datetime.utcnow()
-        # Московское время = UTC + 3
         msk_hour = (now.hour + 3) % 24
+        current_time = now.timestamp()
+
+        # Обновляем кандидатов каждые 30 минут
+        if current_time - last_collect > 1800:
+            candidates_cache = await collect_candidates()
+            last_collect = current_time
+            print(f"Собрано кандидатов: {len(candidates_cache)}")
 
         if 8 <= msk_hour < 24:
-            # Случайная задержка от 45 до 75 минут
             wait_minutes = random.randint(45, 75)
             await asyncio.sleep(wait_minutes * 60)
-            # Проверяем снова что ещё в рабочем времени
             now = datetime.utcnow()
             msk_hour = (now.hour + 3) % 24
             if 8 <= msk_hour < 24:
                 await fetch_and_post()
         else:
-            # Ночью ждём до 8:00 МСК
             await asyncio.sleep(600)
 
 @dp.message(F.text == "/start")
