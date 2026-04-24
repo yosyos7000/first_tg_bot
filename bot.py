@@ -289,6 +289,7 @@ async def fetch_and_post():
         "https://nalog-nalog.ru/novosti/",
         "https://cbr.ru/press/event/",
         "https://minfin.gov.ru/ru/press-center/news/",
+        "https://www.rospotrebnadzor.ru/,
         "https://government.ru/news/",
         "https://mos.ru/news/",
     ]
