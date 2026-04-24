@@ -20,6 +20,7 @@ ADMIN_ID = 416065237
 FREE_LIMIT = 5
 MAX_HISTORY = 10
 CHANNEL_ID = "@probiznav"
+EDITORIAL_CHAT_ID = -5220322973
 
 PLANS = {
     "basic":    {"name": "Базовый",   "price": "299 руб./мес.",  "stars": 250,  "requests": 200,  "file_mb_total": 50,  "file_mb_single": 10},
@@ -34,6 +35,7 @@ db = None
 conversations = {}
 user_roles = {}
 posted_hashes = set()
+pending_edits = {}
 
 ROLES = {
     "business":   {"name": "🧑‍💼 Бизнес-ассистент", "prompt": "Ты профессиональный бизнес-ассистент. Помогаешь с анализом данных, составлением документов, деловой перепиской, стратегическими решениями и бизнес-задачами. Отвечай чётко, структурированно и профессионально."},
@@ -120,6 +122,16 @@ async def init_db():
             posted_at TIMESTAMP DEFAULT NOW()
         )
     """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS drafts (
+            hash TEXT PRIMARY KEY,
+            title TEXT,
+            draft_text TEXT,
+            link TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
 
 async def get_user(user_id, username):
     row = await db.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
@@ -202,7 +214,7 @@ async def activate_subscription(user_id, plan_key):
 async def parse_site(url):
     try:
         from bs4 import BeautifulSoup
-        from urllib.parse import urljoin
+        from urllib.parse import urljoin, urlparse
         async with aiohttp.ClientSession() as session:
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
             async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
@@ -212,8 +224,6 @@ async def parse_site(url):
         soup = BeautifulSoup(html, 'html.parser')
         for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside', 'advertisement']):
             tag.decompose()
-
-        # Стоп-слова — ссылки с ними пропускаем
         stop_words = [
             'реклама', 'advert', 'banner', 'promo', 'sponsor', 'партнер',
             'подписка', 'subscribe', 'login', 'register', 'вакансии', 'jobs',
@@ -221,17 +231,12 @@ async def parse_site(url):
             'теги', 'tags', 'category', 'author', 'profile', 'поиск',
             'facebook', 'twitter', 'vk.com', 'instagram', 't.me',
         ]
-
         articles = []
         for a in soup.find_all('a', href=True):
             title = a.get_text(strip=True)
             href = a['href']
-
-            # Фильтруем по длине заголовка
             if len(title) < 40 or len(title) > 200:
                 continue
-
-            # Фильтруем стоп-слова
             title_lower = title.lower()
             href_lower = href.lower()
             skip = False
@@ -241,28 +246,19 @@ async def parse_site(url):
                     break
             if skip:
                 continue
-
-            # Ссылка должна быть на конкретную статью (содержать /цифры/ или длинный путь)
             if not href.startswith('http'):
                 href = urljoin(url, href)
-
-            # Пропускаем если ссылка ведёт на другой домен
-            from urllib.parse import urlparse
             base_domain = urlparse(url).netloc
             link_domain = urlparse(href).netloc
             if base_domain not in link_domain and link_domain not in base_domain:
                 continue
-
             articles.append({"title": title, "link": href})
-
-        # Убираем дубли
         seen = set()
         unique = []
         for a in articles:
             if a['link'] not in seen:
                 seen.add(a['link'])
                 unique.append(a)
-
         return unique[:10]
     except Exception as e:
         print(f"Parse error {url}: {e}")
@@ -289,7 +285,7 @@ async def get_article_text(url):
         print(f"Article error {url}: {e}")
         return None
 
-async def rewrite_and_post(title, text, link):
+async def prepare_draft(title, text, link):
     prompt = (
         f"Перепиши эту новость для Telegram-канала о бизнесе и налогах. "
         f"Аудитория — предприниматели МСП. "
@@ -306,13 +302,28 @@ async def rewrite_and_post(title, text, link):
     post_text = response.content[0].text
     post_text = re.sub(r'\*\*?(.*?)\*\*?', r'\1', post_text)
     post_text = re.sub(r'^#{1,6}\s', '', post_text, flags=re.MULTILINE)
-    post_text += f'\n\n<a href="{link}">Читать источник</a>'
-    post_text += f"\n@probiznav"
-    await bot.send_message(CHANNEL_ID, post_text, parse_mode="HTML", disable_web_page_preview=True)
+    return post_text
+
+async def save_draft(title, draft_text, link):
+    h = hashlib.md5(link.encode()).hexdigest()
+    await db.execute("INSERT INTO posted_links (hash) VALUES ($1) ON CONFLICT DO NOTHING", h)
+    await db.execute("""
+        INSERT INTO drafts (hash, title, draft_text, link, status)
+        VALUES ($1, $2, $3, $4, 'pending')
+        ON CONFLICT (hash) DO UPDATE SET draft_text = $3, status = 'pending'
+    """, h, title, draft_text, link)
+    return h
+
+async def send_for_approval(draft_id, draft_text, link):
+    preview = f"📝 Черновик на утверждение:\n\n{draft_text}\n\nИсточник: {link}"
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Опубликовать", callback_data=f"pub_{draft_id}")
+    builder.button(text="✏️ Редактировать", callback_data=f"edit_{draft_id}")
+    builder.button(text="❌ Пропустить", callback_data=f"skip_{draft_id}")
+    builder.adjust(3)
+    await bot.send_message(EDITORIAL_CHAT_ID, preview, reply_markup=builder.as_markup())
 
 async def collect_candidates():
-    """Собирает кандидатов со всех сайтов"""
-    import random
     sites = [
         "https://www.rbc.ru/economics/",
         "https://www.kommersant.ru/finance",
@@ -345,12 +356,10 @@ async def collect_candidates():
     return candidates
 
 async def pick_best_candidate(candidates):
-    """Claude выбирает лучшую новость из кандидатов"""
     if not candidates:
         return None
     if len(candidates) == 1:
         return candidates[0]
-
     titles = "\n".join([f"{i+1}. {c['title']}" for i, c in enumerate(candidates[:15])])
     prompt = (
         f"Ты редактор Telegram-канала для предпринимателей МСП. "
@@ -373,42 +382,32 @@ async def pick_best_candidate(candidates):
     return candidates[0]
 
 async def fetch_and_post():
-    """Собирает кандидатов, выбирает лучшего и публикует"""
     candidates = await collect_candidates()
     if not candidates:
         print("Нет новых кандидатов")
         return
-
     best = await pick_best_candidate(candidates)
     if not best:
         return
-
-    h = hashlib.md5(best['link'].encode()).hexdigest()
-    await db.execute("INSERT INTO posted_links (hash) VALUES ($1) ON CONFLICT DO NOTHING", h)
-
     text = await get_article_text(best['link'])
     if not text or len(text) < 100:
         return
-
-    await rewrite_and_post(best['title'], text, best['link'])
+    draft = await prepare_draft(best['title'], text, best['link'])
+    if not draft:
+        return
+    draft_id = await save_draft(best['title'], draft, best['link'])
+    await send_for_approval(draft_id, draft, best['link'])
 
 async def scheduler():
     import random
-    # Сбор кандидатов каждые 30 минут
     last_collect = 0
-    candidates_cache = []
-
     while True:
         now = datetime.utcnow()
         msk_hour = (now.hour + 3) % 24
         current_time = now.timestamp()
-
-        # Обновляем кандидатов каждые 30 минут
         if current_time - last_collect > 1800:
-            candidates_cache = await collect_candidates()
+            await collect_candidates()
             last_collect = current_time
-            print(f"Собрано кандидатов: {len(candidates_cache)}")
-
         if 8 <= msk_hour < 24:
             wait_minutes = random.randint(45, 75)
             await asyncio.sleep(wait_minutes * 60)
@@ -610,6 +609,63 @@ async def reject(callback: CallbackQuery):
     await callback.message.edit_text(callback.message.text + "\n\n❌ Отклонено")
     await callback.answer("Заявка отклонена")
 
+@dp.callback_query(F.data.startswith("pub_"))
+async def publish_draft(callback: CallbackQuery):
+    draft_id = callback.data.split("_", 1)[1]
+    row = await db.fetchrow("SELECT * FROM drafts WHERE hash = $1", draft_id)
+    if not row:
+        await callback.answer("Черновик не найден")
+        return
+    post_text = row["draft_text"]
+    post_text += f'\n\n<a href="{row["link"]}">Читать источник</a>'
+    post_text += f"\n@probiznav"
+    await bot.send_message(CHANNEL_ID, post_text, parse_mode="HTML", disable_web_page_preview=True)
+    await db.execute("UPDATE drafts SET status = 'published' WHERE hash = $1", draft_id)
+    await callback.message.edit_text(callback.message.text + "\n\n✅ Опубликовано!")
+    await callback.answer("Опубликовано в канал!")
+
+@dp.callback_query(F.data.startswith("edit_"))
+async def edit_draft(callback: CallbackQuery):
+    draft_id = callback.data.split("_", 1)[1]
+    row = await db.fetchrow("SELECT * FROM drafts WHERE hash = $1", draft_id)
+    if not row:
+        await callback.answer("Черновик не найден")
+        return
+    pending_edits[callback.from_user.id] = draft_id
+    await callback.message.reply(
+        f"✏️ Отправь исправленный текст в ответ на это сообщение.\n\n"
+        f"Текущий черновик:\n\n{row['draft_text']}"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("skip_"))
+async def skip_draft(callback: CallbackQuery):
+    draft_id = callback.data.split("_", 1)[1]
+    await db.execute("UPDATE drafts SET status = 'skipped' WHERE hash = $1", draft_id)
+    await callback.message.edit_text(callback.message.text + "\n\n❌ Пропущено")
+    await callback.answer("Черновик пропущен")
+
+@dp.message(F.reply_to_message & F.chat.id == EDITORIAL_CHAT_ID)
+async def receive_edited_draft(message: Message):
+    uid = message.from_user.id
+    draft_id = pending_edits.get(uid)
+    if not draft_id:
+        return
+    row = await db.fetchrow("SELECT * FROM drafts WHERE hash = $1", draft_id)
+    if not row:
+        return
+    new_text = message.text
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Опубликовать", callback_data=f"pub_{draft_id}")
+    builder.button(text="❌ Отменить", callback_data=f"skip_{draft_id}")
+    builder.adjust(2)
+    await db.execute("UPDATE drafts SET draft_text = $1 WHERE hash = $2", new_text, draft_id)
+    await message.answer(
+        f"📝 Обновлённый черновик:\n\n{new_text}\n\nИсточник: {row['link']}",
+        reply_markup=builder.as_markup()
+    )
+    del pending_edits[uid]
+
 @dp.message(F.text == "/stats")
 async def stats(message: Message):
     if message.from_user.id != ADMIN_ID:
@@ -650,7 +706,7 @@ async def post_now(message: Message):
         return
     await message.answer("🔄 Запускаю публикацию новостей...")
     await fetch_and_post()
-    await message.answer("✅ Готово! Проверяй канал @probiznav")
+    await message.answer("✅ Черновик отправлен в редакторский чат!")
 
 @dp.message(F.text.startswith("/post"))
 async def manual_post(message: Message):
@@ -668,10 +724,12 @@ async def manual_post(message: Message):
             await message.answer("❌ Не удалось прочитать статью — сайт не отдал текст или заблокировал запрос.")
             return
         title = url.split("/")[-2] or "Новость"
-        await rewrite_and_post(title, text, url)
-        await message.answer("✅ Опубликовано в канал!")
+        draft = await prepare_draft(title, text, url)
+        draft_id = await save_draft(title, draft, url)
+        await send_for_approval(draft_id, draft, url)
+        await message.answer("✅ Черновик отправлен в редакторский чат!")
     except asyncio.TimeoutError:
-        await message.answer("❌ Сайт не ответил за 20 секунд — скорее всего блокирует автоматические запросы.")
+        await message.answer("❌ Сайт не ответил за 20 секунд.")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
 
