@@ -210,23 +210,60 @@ async def parse_site(url):
                     return []
                 html = await resp.text()
         soup = BeautifulSoup(html, 'html.parser')
-        for tag in soup(['script', 'style', 'nav', 'footer', 'header']):
+        for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside', 'advertisement']):
             tag.decompose()
+
+        # Стоп-слова — ссылки с ними пропускаем
+        stop_words = [
+            'реклама', 'advert', 'banner', 'promo', 'sponsor', 'партнер',
+            'подписка', 'subscribe', 'login', 'register', 'вакансии', 'jobs',
+            'about', 'contact', 'policy', 'terms', 'cookie', 'help',
+            'теги', 'tags', 'category', 'author', 'profile', 'поиск',
+            'facebook', 'twitter', 'vk.com', 'instagram', 't.me',
+        ]
+
         articles = []
         for a in soup.find_all('a', href=True):
             title = a.get_text(strip=True)
             href = a['href']
-            if len(title) > 30 and len(title) < 200:
-                if not href.startswith('http'):
-                    href = urljoin(url, href)
-                articles.append({"title": title, "link": href})
+
+            # Фильтруем по длине заголовка
+            if len(title) < 40 or len(title) > 200:
+                continue
+
+            # Фильтруем стоп-слова
+            title_lower = title.lower()
+            href_lower = href.lower()
+            skip = False
+            for word in stop_words:
+                if word in title_lower or word in href_lower:
+                    skip = True
+                    break
+            if skip:
+                continue
+
+            # Ссылка должна быть на конкретную статью (содержать /цифры/ или длинный путь)
+            if not href.startswith('http'):
+                href = urljoin(url, href)
+
+            # Пропускаем если ссылка ведёт на другой домен
+            from urllib.parse import urlparse
+            base_domain = urlparse(url).netloc
+            link_domain = urlparse(href).netloc
+            if base_domain not in link_domain and link_domain not in base_domain:
+                continue
+
+            articles.append({"title": title, "link": href})
+
+        # Убираем дубли
         seen = set()
         unique = []
         for a in articles:
             if a['link'] not in seen:
                 seen.add(a['link'])
                 unique.append(a)
-        return unique[:5]
+
+        return unique[:10]
     except Exception as e:
         print(f"Parse error {url}: {e}")
         return []
@@ -289,7 +326,7 @@ async def fetch_and_post():
         "https://nalog-nalog.ru/novosti/",
         "https://cbr.ru/press/event/",
         "https://minfin.gov.ru/ru/press-center/news/",
-        "https://www.rospotrebnadzor.ru/,
+        "https://www.rospotrebnadzor.ru/about/info/news/",
         "https://government.ru/news/",
         "https://mos.ru/news/",
     ]
