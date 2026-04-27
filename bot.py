@@ -780,7 +780,11 @@ async def clear(message: Message):
 
 @dp.message(F.text == "/support")
 async def support(message: Message):
-    await message.answer("🆘 Поддержка\n\nЕсли у вас возникли вопросы — напишите администратору:\n@polyakovkonst")
+    await message.answer(
+        "🆘 Поддержка\n\n"
+        "Если у вас возникли вопросы — напишите администратору:\n@polyakovkonst\n\n"
+        "📄 Публичная оферта: https://telegra.ph/Publichnaya-oferta-River-first-bot-04-27"
+    )
 
 @dp.message(F.text == "/postnow")
 async def post_now(message: Message):
