@@ -349,6 +349,17 @@ async def collect_candidates():
         "https://minfin.gov.ru/ru/press-center/news/",
         "https://www.rospotrebnadzor.ru/about/info/news/",
         "https://government.ru/news/",
+        "https://www.klerk.ru/news/",
+        "https://ofd.ru/news/",
+        "https://biz.liga.net/",
+        "https://www.audit-it.ru/news/",
+        "https://taxpravo.ru/novosti/",
+        "https://www.garant.ru/news/",
+        "https://www.consultant.ru/law/hotdocs/",
+        "https://smb.gov.ru/news/",
+        "https://corpmsp.ru/press-centr/news/",
+        "https://deloros.ru/news/",
+        "https://www.sberbank.ru/ru/s_m_business/",
         "https://mos.ru/news/",
     ]
     candidates = []
