@@ -18,14 +18,15 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 ADMIN_ID = 416065237
 FREE_LIMIT = 5
+CHANNEL_BONUS_LIMIT = 30
 MAX_HISTORY = 10
 CHANNEL_ID = "@probiznav"
 EDITORIAL_CHAT_ID = -5220322973
 
 PLANS = {
-    "basic":    {"name": "Базовый",   "price": "299 руб./мес.",  "stars": 250,  "requests": 200,  "file_mb_total": 50,  "file_mb_single": 10},
-    "standard": {"name": "Стандарт",  "price": "599 руб./мес.",  "stars": 500,  "requests": 500,  "file_mb_total": 150, "file_mb_single": 10},
-    "pro":      {"name": "Про",       "price": "999 руб./мес.",  "stars": 830,  "requests": 99999,"file_mb_total": 500, "file_mb_single": 25},
+    "basic":    {"name": "Базовый",   "price": "150 ⭐️/мес.",  "stars": 150,  "requests": 200,  "file_mb_total": 50,  "file_mb_single": 10},
+    "standard": {"name": "Стандарт",  "price": "250 ⭐️/мес.",  "stars": 250,  "requests": 500,  "file_mb_total": 150, "file_mb_single": 10},
+    "pro":      {"name": "Про",       "price": "350 ⭐️/мес.",  "stars": 350,  "requests": 99999,"file_mb_total": 500, "file_mb_single": 25},
 }
 
 bot = Bot(token=BOT_TOKEN)
@@ -61,7 +62,9 @@ WELCOME_TEXT = """👋 Привет! Я твой ИИ-помощник на ба
 /help — как пользоваться ботом
 /subscribe — оформить подписку
 
-У тебя есть {limit} бесплатных запросов каждый день.
+🆓 Бесплатно: {limit} запросов в день
+🎁 Подпишись на @probiznav и получи 30 запросов в день бесплатно!
+
 Просто напиши свой вопрос или отправь файл! 👇"""
 
 HELP_TEXT = """📖 Как пользоваться ботом
@@ -142,6 +145,13 @@ async def init_db():
         )
     """)
 
+async def is_subscribed(user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(CHANNEL_ID, user_id)
+        return member.status in ["member", "administrator", "creator"]
+    except:
+        return False
+
 async def get_user(user_id, username):
     row = await db.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
     if not row:
@@ -171,8 +181,20 @@ async def check_limits(user_id, username, file_mb=0):
             free_used = 0
         else:
             free_used = row["free_used"]
-        if free_used >= FREE_LIMIT:
-            return False, (f"На сегодня бесплатные запросы закончились ({FREE_LIMIT}/день).\nВозвращайся завтра или напиши /subscribe для безлимитного доступа.")
+        subscribed = await is_subscribed(user_id)
+        daily_limit = CHANNEL_BONUS_LIMIT if subscribed else FREE_LIMIT
+        if free_used >= daily_limit:
+            if subscribed:
+                return False, (
+                    f"На сегодня запросы закончились ({daily_limit}/день).\n"
+                    "Возвращайся завтра или напиши /subscribe для безлимитного доступа."
+                )
+            else:
+                return False, (
+                    f"На сегодня бесплатные запросы закончились ({FREE_LIMIT}/день).\n\n"
+                    f"🎁 Подпишись на канал @probiznav и получи 30 запросов в день бесплатно!\n\n"
+                    "Или напиши /subscribe для полного доступа."
+                )
         return True, None
     plan = PLANS.get(plan_key, PLANS["basic"])
     if row["requests_used"] >= plan["requests"]:
@@ -460,7 +482,10 @@ async def scheduler():
 @dp.message(F.text == "/start")
 async def start(message: Message):
     conversations.pop(message.from_user.id, None)
-    await message.answer(WELCOME_TEXT.format(limit=FREE_LIMIT), reply_markup=ReplyKeyboardRemove())
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📢 Наш канал @probiznav", url="https://t.me/probiznav")
+    builder.adjust(1)
+    await message.answer(WELCOME_TEXT.format(limit=FREE_LIMIT), reply_markup=builder.as_markup())
 
 @dp.message(F.text == "/help")
 async def help_cmd(message: Message):
@@ -513,7 +538,12 @@ async def profile(message: Message):
     elif row["subscription_until"] and not row["is_paid"]:
         sub_text = f"❌ Истекла: {row['subscription_until'].strftime('%d.%m.%Y %H:%M')}"
     else:
-        sub_text = f"🆓 Бесплатный план ({FREE_LIMIT - min(row['free_used'], FREE_LIMIT)} запросов осталось сегодня)"
+        subscribed = await is_subscribed(uid)
+        daily_limit = CHANNEL_BONUS_LIMIT if subscribed else FREE_LIMIT
+        sub_text = (
+            f"🆓 Бесплатный план ({daily_limit - min(row['free_used'], daily_limit)} запросов осталось сегодня)\n"
+            f"{'✅ Подписан на канал — бонус 30 запросов/день' if subscribed else '📢 Подпишись на @probiznav — получи 30 запросов/день'}"
+        )
     await message.answer(
         f"👤 Профиль\n\n"
         f"🤖 Модель: Claude Sonnet\n"
@@ -542,7 +572,7 @@ async def subscribe(message: Message):
         builder.button(text=f"{plan['name']} — {plan['price']}", callback_data=f"buy_{key}")
     builder.button(text="🤝 Тестовый доступ", callback_data=f"test_{uid}")
     builder.adjust(1)
-    await message.answer("👇 Выбери тариф:", reply_markup=builder.as_markup())
+    await message.answer("💬 Если есть вопросы по тарифам — обращайтесь к администратору: @polyakovkonst")
 
 @dp.callback_query(F.data.startswith("test_"))
 async def test_access(callback: CallbackQuery):
