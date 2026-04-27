@@ -563,17 +563,18 @@ async def subscribe(message: Message):
     uid = message.from_user.id
     await message.answer(
         "💰 Выбери тариф:\n\n"
-        "🔹 Базовый — 299 руб./мес.\n200 запросов + 50 МБ файлов\n\n"
-        "🔸 Стандарт — 499 руб./мес.\n500 запросов + 150 МБ файлов\n\n"
-        "💎 Про — 699 руб./мес.\nБезлимит запросов + 500 МБ файлов"
+        "🔹 Базовый — 299 руб./мес.(150⭐️) \n200 запросов + 50 МБ файлов\n\n"
+        "🔸 Стандарт — 499 руб./мес.(250⭐️) \n500 запросов + 150 МБ файлов\n\n"
+        "💎 Про — 699 руб./мес.(350⭐️) \nБезлимит запросов + 500 МБ файлов"
     )
     builder = InlineKeyboardBuilder()
     for key, plan in PLANS.items():
         builder.button(text=f"{plan['name']} — {plan['price']}", callback_data=f"buy_{key}")
     builder.button(text="🤝 Тестовый доступ", callback_data=f"test_{uid}")
     builder.adjust(1)
+    await message.answer("👇 Выбери тариф:", reply_markup=builder.as_markup())
     await message.answer("💬 Если есть вопросы по тарифам — обращайтесь к администратору: @polyakovkonst")
-
+    
 @dp.callback_query(F.data.startswith("test_"))
 async def test_access(callback: CallbackQuery):
     uid = int(callback.data.split("_")[1])
