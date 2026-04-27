@@ -26,7 +26,7 @@ EDITORIAL_CHAT_ID = -5220322973
 PLANS = {
     "basic":    {"name": "Базовый",   "price": "150 ⭐️/мес.",  "stars": 150,  "requests": 200,  "file_mb_total": 50,  "file_mb_single": 10},
     "standard": {"name": "Стандарт",  "price": "250 ⭐️/мес.",  "stars": 250,  "requests": 500,  "file_mb_total": 150, "file_mb_single": 10},
-    "pro":      {"name": "Про",       "price": "350 ⭐️/мес.",  "stars": 350,  "requests": 99999,"file_mb_total": 500, "file_mb_single": 25},
+    "pro":      {"name": "Про",       "price": "350 ⭐️/мес.",  "stars": 350,  "requests": 1000,  "file_mb_total": 500, "file_mb_single": 25},
 }
 
 bot = Bot(token=BOT_TOKEN)
@@ -564,8 +564,8 @@ async def subscribe(message: Message):
     await message.answer(
         "💰 Выбери тариф:\n\n"
         "🔹 Базовый — 299 руб./мес.\n200 запросов + 50 МБ файлов\n\n"
-        "🔸 Стандарт — 599 руб./мес.\n500 запросов + 150 МБ файлов\n\n"
-        "💎 Про — 999 руб./мес.\nБезлимит запросов + 500 МБ файлов"
+        "🔸 Стандарт — 499 руб./мес.\n500 запросов + 150 МБ файлов\n\n"
+        "💎 Про — 699 руб./мес.\nБезлимит запросов + 500 МБ файлов"
     )
     builder = InlineKeyboardBuilder()
     for key, plan in PLANS.items():
