@@ -382,7 +382,7 @@ async def prepare_draft(title, text, link):
         f"Текст: {text[:1500]}"
     )
     response = ai.messages.create(
-        model="claude-sonnet-4-5-20251022",
+        model="claude-sonnet-4-5-20250929",
         max_tokens=500,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -467,7 +467,7 @@ async def pick_top_candidates(candidates, n=3):
         f"{titles}"
     )
     response = ai.messages.create(
-        model="claude-sonnet-4-5-20251022",
+        model="claude-sonnet-4-5-20250929",
         max_tokens=20,
         messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}]
     )
@@ -923,7 +923,7 @@ async def handle_photo(message: Message):
     if not allowed:
         return
     response = ai.messages.create(
-        model="claude-sonnet-4-5-20251022",
+        model="claude-sonnet-4-5-20250929",
         max_tokens=1500,
         system=get_system_prompt(uid),
         messages=conversations[uid]
@@ -984,7 +984,7 @@ async def handle_document(message: Message):
     if not allowed:
         return
     response = ai.messages.create(
-        model="claude-sonnet-4-5-20251022",
+        model="claude-sonnet-4-5-20250929",
         max_tokens=1500,
         system=get_system_prompt(uid),
         messages=conversations[uid]
@@ -1005,7 +1005,7 @@ async def handle(message: Message):
     if not allowed:
         return
     response = ai.messages.create(
-        model="claude-sonnet-4-5-20251022",
+        model="claude-sonnet-4-5-20250929",
         max_tokens=1500,
         system=get_system_prompt(uid),
         messages=conversations[uid]
