@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import json
 import asyncpg
 import aiohttp
 import base64
@@ -92,6 +93,61 @@ HELP_TEXT = """📖 Как пользоваться ботом
 — Базовый: 150 ⭐️ — 200 запросов + 50 МБ файлов
 — Стандарт: 250 ⭐️ — 500 запросов + 150 МБ файлов
 — Про: 350 ⭐️ — безлимит запросов + 500 МБ файлов"""
+
+
+# ─── Утилита: разбить длинный текст на части по 4096 символов ────────────────
+
+def split_message(text: str, max_len: int = 4096) -> list[str]:
+    """Разбивает текст на части, стараясь не резать посередине абзаца."""
+    if len(text) <= max_len:
+        return [text]
+    parts = []
+    while text:
+        if len(text) <= max_len:
+            parts.append(text)
+            break
+        # ищем последний перенос строки в пределах max_len
+        cut = text.rfind('\n', 0, max_len)
+        if cut == -1 or cut < max_len // 2:
+            # нет удобного места — режем по пробелу
+            cut = text.rfind(' ', 0, max_len)
+        if cut == -1:
+            cut = max_len
+        parts.append(text[:cut].strip())
+        text = text[cut:].strip()
+    return parts
+
+
+async def send_long_message(message: Message, text: str, **kwargs):
+    """Отправляет текст, разбивая на части если он длиннее 4096 символов."""
+    parts = split_message(text)
+    for part in parts:
+        await message.answer(part, **kwargs)
+        if len(parts) > 1:
+            await asyncio.sleep(0.3)  # небольшая пауза между сообщениями
+
+
+# ─── Утилита: сериализация/десериализация контента для БД ────────────────────
+
+def content_to_str(content) -> str:
+    """Сохраняет content (строку или список) в строку для БД."""
+    if isinstance(content, str):
+        return content
+    return json.dumps(content, ensure_ascii=False)
+
+
+def str_to_content(s: str):
+    """Восстанавливает content из строки БД."""
+    try:
+        val = json.loads(s)
+        if isinstance(val, (list, dict)):
+            return val
+    except Exception:
+        pass
+    return s
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 async def init_db():
     global db
@@ -326,7 +382,7 @@ async def prepare_draft(title, text, link):
         f"Текст: {text[:1500]}"
     )
     response = ai.messages.create(
-        model="claude-sonnet-4-5",
+        model="claude-sonnet-4-5-20251022",
         max_tokens=500,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -411,7 +467,7 @@ async def pick_top_candidates(candidates, n=3):
         f"{titles}"
     )
     response = ai.messages.create(
-        model="claude-sonnet-4-5",
+        model="claude-sonnet-4-5-20251022",
         max_tokens=20,
         messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}]
     )
@@ -439,7 +495,7 @@ async def fetch_and_post():
             continue
         draft_id = await save_draft(candidate['title'], draft, candidate['link'])
         await send_for_approval(draft_id, draft, candidate['link'])
-        await asyncio.sleep(2)
+        await asyncio.sleep(5)  # пауза между запросами к Claude чтобы не упасть в rate limit
 
 async def process_publish_queue():
     while True:
@@ -574,7 +630,7 @@ async def subscribe(message: Message):
     builder.adjust(1)
     await message.answer("👇 Выбери тариф:", reply_markup=builder.as_markup())
     await message.answer("💬 Если есть вопросы по тарифам — обращайтесь к администратору: @polyakovkonst")
-    
+
 @dp.callback_query(F.data.startswith("test_"))
 async def test_access(callback: CallbackQuery):
     uid = int(callback.data.split("_")[1])
@@ -819,6 +875,7 @@ async def manual_post(message: Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
 
+
 async def handle_with_access(message: Message, content, file_mb=0):
     uid = message.from_user.id
     username = message.from_user.username or "без username"
@@ -832,8 +889,13 @@ async def handle_with_access(message: Message, content, file_mb=0):
             "SELECT role, content FROM conversations WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2",
             uid, MAX_HISTORY * 2
         )
-        conversations[uid] = [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
-    content_str = content if isinstance(content, str) else str(content)
+        # ФИX: восстанавливаем content из JSON если это был список (фото/документ)
+        conversations[uid] = [
+            {"role": r["role"], "content": str_to_content(r["content"])}
+            for r in reversed(rows)
+        ]
+    # ФИX: сохраняем в БД через json.dumps если content — список
+    content_str = content_to_str(content)
     await db.execute(
         "INSERT INTO conversations (user_id, role, content) VALUES ($1, $2, $3)",
         uid, "user", content_str
@@ -842,6 +904,7 @@ async def handle_with_access(message: Message, content, file_mb=0):
     if len(conversations[uid]) > MAX_HISTORY * 2:
         conversations[uid] = conversations[uid][-MAX_HISTORY * 2:]
     return True
+
 
 @dp.message(F.photo)
 async def handle_photo(message: Message):
@@ -859,13 +922,19 @@ async def handle_photo(message: Message):
     allowed = await handle_with_access(message, content, file_mb)
     if not allowed:
         return
-    response = ai.messages.create(model="claude-sonnet-4-5", max_tokens=1500, system=get_system_prompt(uid), messages=conversations[uid])
+    response = ai.messages.create(
+        model="claude-sonnet-4-5-20251022",
+        max_tokens=1500,
+        system=get_system_prompt(uid),
+        messages=conversations[uid]
+    )
     reply = response.content[0].text
     conversations[uid].append({"role": "assistant", "content": reply})
     await db.execute("INSERT INTO conversations (user_id, role, content) VALUES ($1, $2, $3)", uid, "assistant", reply)
     reply = re.sub(r'\*\*?(.*?)\*\*?', r'\1', reply)
     reply = re.sub(r'#{1,6}\s?', '', reply)
-    await message.answer(reply)
+    await send_long_message(message, reply)
+
 
 @dp.message(F.document)
 async def handle_document(message: Message):
@@ -914,13 +983,19 @@ async def handle_document(message: Message):
     allowed = await handle_with_access(message, content, file_mb)
     if not allowed:
         return
-    response = ai.messages.create(model="claude-sonnet-4-5", max_tokens=1500, system=get_system_prompt(uid), messages=conversations[uid])
+    response = ai.messages.create(
+        model="claude-sonnet-4-5-20251022",
+        max_tokens=1500,
+        system=get_system_prompt(uid),
+        messages=conversations[uid]
+    )
     reply = response.content[0].text
     conversations[uid].append({"role": "assistant", "content": reply})
     await db.execute("INSERT INTO conversations (user_id, role, content) VALUES ($1, $2, $3)", uid, "assistant", reply)
     reply = re.sub(r'\*\*?(.*?)\*\*?', r'\1', reply)
     reply = re.sub(r'#{1,6}\s?', '', reply)
-    await message.answer(reply)
+    await send_long_message(message, reply)
+
 
 @dp.message()
 async def handle(message: Message):
@@ -929,13 +1004,19 @@ async def handle(message: Message):
     allowed = await handle_with_access(message, message.text)
     if not allowed:
         return
-    response = ai.messages.create(model="claude-sonnet-4-5", max_tokens=1500, system=get_system_prompt(uid), messages=conversations[uid])
+    response = ai.messages.create(
+        model="claude-sonnet-4-5-20251022",
+        max_tokens=1500,
+        system=get_system_prompt(uid),
+        messages=conversations[uid]
+    )
     reply = response.content[0].text
     conversations[uid].append({"role": "assistant", "content": reply})
     await db.execute("INSERT INTO conversations (user_id, role, content) VALUES ($1, $2, $3)", uid, "assistant", reply)
     reply = re.sub(r'\*\*?(.*?)\*\*?', r'\1', reply)
     reply = re.sub(r'#{1,6}\s?', '', reply)
-    await message.answer(reply, reply_markup=ReplyKeyboardRemove())
+    await send_long_message(message, reply, reply_markup=ReplyKeyboardRemove())
+
 
 async def main():
     await init_db()
