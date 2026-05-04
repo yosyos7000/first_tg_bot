@@ -429,7 +429,6 @@ async def collect_candidates():
         "https://government.ru/news/",
         "https://www.klerk.ru/news/",
         "https://ofd.ru/news/",
-        "https://biz.liga.net/",
         "https://www.audit-it.ru/news/",
         "https://taxpravo.ru/novosti/",
         "https://www.garant.ru/news/",
