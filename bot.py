@@ -17,6 +17,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ANTHROPIC_KEY = os.getenv("ANTHROPIC_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+PROXY_URL = "http://user406008:5o06f2@138.249.26.121:5009"
+
 ADMIN_ID = 416065237
 FREE_LIMIT = 5
 CHANNEL_BONUS_LIMIT = 30
@@ -228,14 +230,14 @@ async def get_user(user_id, username):
     if not row:
         await db.execute("INSERT INTO users (user_id, username) VALUES ($1, $2)", user_id, username)
         return await db.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
-    if row["is_paid"] and row["subscription_until"] and row["subscription_until"] < datetime.utcnow():
+    if row["is_paid"] and row["subscription_until"] and row["subscription_until"] < datetime.now(timezone.utc).replace(tzinfo=None):
         await db.execute("UPDATE users SET is_paid = FALSE, plan = 'free', requests_used = 0, file_mb_used = 0 WHERE user_id = $1", user_id)
         await bot.send_message(user_id, "⚠️ Ваша подписка истекла. Напишите /subscribe чтобы продлить.")
         return await db.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
     if row["is_paid"] and row["period_start"]:
         period_end = row["period_start"] + timedelta(days=30)
-        if datetime.utcnow() > period_end:
-            await db.execute("UPDATE users SET requests_used = 0, file_mb_used = 0, period_start = $1 WHERE user_id = $2", datetime.utcnow(), user_id)
+        if datetime.now(timezone.utc).replace(tzinfo=None) > period_end:
+            await db.execute("UPDATE users SET requests_used = 0, file_mb_used = 0, period_start = $1 WHERE user_id = $2", datetime.now(timezone.utc).replace(tzinfo=None), user_id)
             return await db.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
     return row
 
@@ -245,7 +247,7 @@ async def check_limits(user_id, username, file_mb=0):
     row = await get_user(user_id, username)
     plan_key = row["plan"] or "free"
     if not row["is_paid"]:
-        today = datetime.utcnow().date()
+        today = datetime.now(timezone.utc).replace(tzinfo=None).date()
         reset_date = row["free_reset_date"] if row["free_reset_date"] else None
         if reset_date != today:
             await db.execute("UPDATE users SET free_used = 0, free_reset_date = $1 WHERE user_id = $2", today, user_id)
@@ -303,14 +305,14 @@ async def download_file(file_id):
 async def activate_subscription(user_id, plan_key):
     plan = PLANS.get(plan_key, PLANS["basic"])
     row = await db.fetchrow("SELECT subscription_until, is_paid FROM users WHERE user_id = $1", user_id)
-    if row and row["is_paid"] and row["subscription_until"] and row["subscription_until"] > datetime.utcnow():
+    if row and row["is_paid"] and row["subscription_until"] and row["subscription_until"] > datetime.now(timezone.utc).replace(tzinfo=None):
         new_until = row["subscription_until"] + timedelta(days=30)
     else:
-        new_until = datetime.utcnow() + timedelta(days=30)
+        new_until = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=30)
     await db.execute("""
         UPDATE users SET is_paid = TRUE, subscription_until = $1, plan = $2,
         requests_used = 0, file_mb_used = 0, period_start = $3 WHERE user_id = $4
-    """, new_until, plan_key, datetime.utcnow(), user_id)
+    """, new_until, plan_key, datetime.now(timezone.utc).replace(tzinfo=None), user_id)
     return new_until
 
 async def parse_site(url):
@@ -319,7 +321,7 @@ async def parse_site(url):
         from urllib.parse import urljoin, urlparse
         async with aiohttp.ClientSession() as session:
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.get(url, headers=headers, proxy=PROXY_URL, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status != 200:
                     return []
                 html = await resp.text()
@@ -371,7 +373,7 @@ async def get_article_text(url):
         from bs4 import BeautifulSoup
         async with aiohttp.ClientSession() as session:
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.get(url, headers=headers, proxy=PROXY_URL, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status != 200:
                     return None
                 html = await resp.text()
@@ -436,24 +438,11 @@ async def collect_candidates():
         "https://secretmag.ru/news/",
         "https://www.banki.ru/news/",
         "https://journal.tinkoff.ru/news/",
-        "https://sovcombank.ru/blog",
-        "https://nalog-nalog.ru/novosti/",
-        "https://cbr.ru/press/event/",
-        "https://minfin.gov.ru/ru/press-center/news/",
-        "https://www.rospotrebnadzor.ru/about/info/news/",
-        "https://government.ru/news/",
         "https://www.klerk.ru/news/",
-        "https://ofd.ru/news/",
-        "https://biz.liga.net/",
         "https://www.audit-it.ru/news/",
-        "https://taxpravo.ru/novosti/",
         "https://www.garant.ru/news/",
-        "https://www.consultant.ru/law/hotdocs/",
-        "https://smb.gov.ru/news/",
         "https://corpmsp.ru/press-centr/news/",
         "https://deloros.ru/news/",
-        "https://www.sberbank.ru/ru/s_m_business/",
-        "https://mos.ru/news/",
     ]
     candidates = []
     for site_url in sites:
@@ -534,7 +523,7 @@ async def scheduler():
     import random
     last_collect = 0
     while True:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         msk_hour = (now.hour + 3) % 24
         current_time = now.timestamp()
         if current_time - last_collect > 1800:
@@ -543,7 +532,7 @@ async def scheduler():
         if 8 <= msk_hour < 24:
             wait_minutes = random.randint(45, 75)
             await asyncio.sleep(wait_minutes * 60)
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             msk_hour = (now.hour + 3) % 24
             if 8 <= msk_hour < 24:
                 await fetch_and_post()
