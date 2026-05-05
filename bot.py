@@ -33,7 +33,7 @@ PLANS = {
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 ai = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-db = None
+db: asyncpg.Pool = None
 conversations = {}
 user_roles = {}
 posted_hashes = set()
@@ -97,6 +97,21 @@ HELP_TEXT = """📖 Как пользоваться ботом
 
 # ─── Утилита: разбить длинный текст на части по 4096 символов ────────────────
 
+async def claude_create_with_retry(max_retries=3, **kwargs):
+    """Вызывает Claude API с повторными попытками при перегрузке (529)."""
+    for attempt in range(max_retries):
+        try:
+            return ai.messages.create(**kwargs)
+        except anthropic.APIStatusError as e:
+            if e.status_code == 529 and attempt < max_retries - 1:
+                wait = 10 * (attempt + 1)
+                print(f"Claude перегружен, повтор через {wait} сек... (попытка {attempt+1})")
+                await asyncio.sleep(wait)
+            else:
+                raise
+    raise RuntimeError("Claude недоступен после нескольких попыток")
+
+
 def split_message(text: str, max_len: int = 4096) -> list[str]:
     """Разбивает текст на части, стараясь не резать посередине абзаца."""
     if len(text) <= max_len:
@@ -151,7 +166,7 @@ def str_to_content(s: str):
 
 async def init_db():
     global db
-    db = await asyncpg.connect(DATABASE_URL)
+    db = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
     await db.execute("""
         CREATE TABLE IF NOT EXISTS conversations (
             user_id BIGINT,
@@ -381,8 +396,8 @@ async def prepare_draft(title, text, link):
         f"Заголовок: {title}\n"
         f"Текст: {text[:1500]}"
     )
-    response = ai.messages.create(
-        model="claude-sonnet-4-5-20250929",
+    response = await claude_create_with_retry(
+        model="claude-sonnet-4-5-20251022",
         max_tokens=500,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -429,6 +444,7 @@ async def collect_candidates():
         "https://government.ru/news/",
         "https://www.klerk.ru/news/",
         "https://ofd.ru/news/",
+        "https://biz.liga.net/",
         "https://www.audit-it.ru/news/",
         "https://taxpravo.ru/novosti/",
         "https://www.garant.ru/news/",
@@ -465,8 +481,8 @@ async def pick_top_candidates(candidates, n=3):
         f"Ответь ТОЛЬКО номерами через запятую, например: 2, 5, 8\n\n"
         f"{titles}"
     )
-    response = ai.messages.create(
-        model="claude-sonnet-4-5-20250929",
+    response = await claude_create_with_retry(
+        model="claude-sonnet-4-5-20251022",
         max_tokens=20,
         messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}]
     )
@@ -921,8 +937,8 @@ async def handle_photo(message: Message):
     allowed = await handle_with_access(message, content, file_mb)
     if not allowed:
         return
-    response = ai.messages.create(
-        model="claude-sonnet-4-5-20250929",
+    response = await claude_create_with_retry(
+        model="claude-sonnet-4-5-20251022",
         max_tokens=1500,
         system=get_system_prompt(uid),
         messages=conversations[uid]
@@ -982,8 +998,8 @@ async def handle_document(message: Message):
     allowed = await handle_with_access(message, content, file_mb)
     if not allowed:
         return
-    response = ai.messages.create(
-        model="claude-sonnet-4-5-20250929",
+    response = await claude_create_with_retry(
+        model="claude-sonnet-4-5-20251022",
         max_tokens=1500,
         system=get_system_prompt(uid),
         messages=conversations[uid]
@@ -1003,8 +1019,8 @@ async def handle(message: Message):
     allowed = await handle_with_access(message, message.text)
     if not allowed:
         return
-    response = ai.messages.create(
-        model="claude-sonnet-4-5-20250929",
+    response = await claude_create_with_retry(
+        model="claude-sonnet-4-5-20251022",
         max_tokens=1500,
         system=get_system_prompt(uid),
         messages=conversations[uid]
