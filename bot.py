@@ -470,7 +470,8 @@ async def collect_candidates():
         "https://www.audit-it.ru/news/",
         "https://www.garant.ru/news/",
         "https://corpmsp.ru/press-centr/news/",
-        "https://deloros.ru/news/",
+        "https://www.nalog.gov.ru/rn77/news/", 
+        "https://deloros.ru/press-center/news/",
     ]
     candidates = []
     for site_url in sites:
