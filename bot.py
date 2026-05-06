@@ -418,8 +418,7 @@ async def prepare_draft(title, text, link):
     prompt = (
         f"Перепиши эту новость для Telegram-канала о бизнесе и налогах. "
         f"Аудитория — предприниматели МСП. "
-        f"Требования: без смайликов и эмодзи, только текст. "
-        f"Добавь один хештег в конце через # (например #налоги или #МСП). Не более 4 предложений.\n\n"
+        f"Требования: без смайликов и эмодзи, без хештегов, только текст. Не более 4 предложений.\n\n"
         f"Заголовок: {title}\n"
         f"Текст: {text[:1500]}"
     )
@@ -470,8 +469,7 @@ async def collect_candidates():
         "https://www.audit-it.ru/news/",
         "https://www.garant.ru/news/",
         "https://corpmsp.ru/press-centr/news/",
-        "https://www.nalog.gov.ru/rn77/news/", 
-        "https://deloros.ru/press-center/news/",
+        "https://deloros.ru/news/",
     ]
     candidates = []
     for site_url in sites:
@@ -551,11 +549,9 @@ async def process_publish_queue():
                 draft_id = publish_queue.pop(0)
                 row = await db.fetchrow("SELECT * FROM drafts WHERE hash = $1", draft_id)
                 if row and row["status"] == "queued":
-                    post_text = row["draft_text"]
-                    post_text += f'\n\n<a href="{row["link"]}">Читать источник</a>'
-                    post_text += f"\n@probiznav"
+                    post_text = row["draft_text"].rstrip() + " @probiznav"
                     try:
-                        await bot.send_message(CHANNEL_ID, post_text, parse_mode="HTML", disable_web_page_preview=True)
+                        await bot.send_message(CHANNEL_ID, post_text, disable_web_page_preview=True)
                         await db.execute("UPDATE drafts SET status = 'published' WHERE hash = $1", draft_id)
                         print(f"[queue] Опубликовано: {draft_id}")
                     except Exception as e:
@@ -828,10 +824,8 @@ async def publish_draft(callback: CallbackQuery):
         )
         await callback.answer("Добавлено в очередь!")
     else:
-        post_text = row["draft_text"]
-        post_text += f'\n\n<a href="{row["link"]}">Читать источник</a>'
-        post_text += f"\n@probiznav"
-        await bot.send_message(CHANNEL_ID, post_text, parse_mode="HTML", disable_web_page_preview=True)
+        post_text = row["draft_text"].rstrip() + " @probiznav"
+        await bot.send_message(CHANNEL_ID, post_text, disable_web_page_preview=True)
         await db.execute("UPDATE drafts SET status = 'published' WHERE hash = $1", draft_id)
         await callback.message.edit_text(callback.message.text + "\n\n✅ Опубликовано!")
         await callback.answer("Опубликовано в канал!")
