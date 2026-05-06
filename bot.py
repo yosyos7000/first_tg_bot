@@ -29,7 +29,7 @@ EDITORIAL_CHAT_ID = -5220322973
 PLANS = {
     "basic":    {"name": "Базовый",   "price": "150 ⭐️/мес.",  "stars": 150,  "requests": 200,  "file_mb_total": 50,  "file_mb_single": 10},
     "standard": {"name": "Стандарт",  "price": "250 ⭐️/мес.",  "stars": 250,  "requests": 500,  "file_mb_total": 150, "file_mb_single": 10},
-    "pro":      {"name": "Про",       "price": "350 ⭐️/мес.",  "stars": 350,  "requests": 1000,  "file_mb_total": 500, "file_mb_single": 25},
+    "pro":      {"name": "Про",       "price": "350 ⭐️/мес.",  "stars": 350,  "requests": 1000, "file_mb_total": 500, "file_mb_single": 25},
 }
 
 bot = Bot(token=BOT_TOKEN)
@@ -99,6 +99,11 @@ HELP_TEXT = """📖 Как пользоваться ботом
 
 # ─── Утилита: разбить длинный текст на части по 4096 символов ────────────────
 
+def now_utc() -> datetime:
+    """Возвращает текущее время UTC без tzinfo (для совместимости с БД)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 async def claude_create_with_retry(max_retries=3, **kwargs):
     """Вызывает Claude API с повторными попытками при перегрузке (529)."""
     for attempt in range(max_retries):
@@ -115,7 +120,6 @@ async def claude_create_with_retry(max_retries=3, **kwargs):
 
 
 def split_message(text: str, max_len: int = 4096) -> list[str]:
-    """Разбивает текст на части, стараясь не резать посередине абзаца."""
     if len(text) <= max_len:
         return [text]
     parts = []
@@ -123,10 +127,8 @@ def split_message(text: str, max_len: int = 4096) -> list[str]:
         if len(text) <= max_len:
             parts.append(text)
             break
-        # ищем последний перенос строки в пределах max_len
         cut = text.rfind('\n', 0, max_len)
         if cut == -1 or cut < max_len // 2:
-            # нет удобного места — режем по пробелу
             cut = text.rfind(' ', 0, max_len)
         if cut == -1:
             cut = max_len
@@ -136,25 +138,22 @@ def split_message(text: str, max_len: int = 4096) -> list[str]:
 
 
 async def send_long_message(message: Message, text: str, **kwargs):
-    """Отправляет текст, разбивая на части если он длиннее 4096 символов."""
     parts = split_message(text)
     for part in parts:
         await message.answer(part, **kwargs)
         if len(parts) > 1:
-            await asyncio.sleep(0.3)  # небольшая пауза между сообщениями
+            await asyncio.sleep(0.3)
 
 
 # ─── Утилита: сериализация/десериализация контента для БД ────────────────────
 
 def content_to_str(content) -> str:
-    """Сохраняет content (строку или список) в строку для БД."""
     if isinstance(content, str):
         return content
     return json.dumps(content, ensure_ascii=False)
 
 
 def str_to_content(s: str):
-    """Восстанавливает content из строки БД."""
     try:
         val = json.loads(s)
         if isinstance(val, (list, dict)):
@@ -218,6 +217,21 @@ async def init_db():
         )
     """)
 
+
+async def test_proxy():
+    """Проверяет работу прокси при старте."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://www.rbc.ru/",
+                proxy=PROXY_URL,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                print(f"[proxy] Статус RBC: {resp.status} — прокси {'работает ✓' if resp.status == 200 else 'вернул ошибку'}")
+    except Exception as e:
+        print(f"[proxy] ОШИБКА подключения: {e}")
+
+
 async def is_subscribed(user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(CHANNEL_ID, user_id)
@@ -225,21 +239,23 @@ async def is_subscribed(user_id: int) -> bool:
     except:
         return False
 
+
 async def get_user(user_id, username):
     row = await db.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
     if not row:
         await db.execute("INSERT INTO users (user_id, username) VALUES ($1, $2)", user_id, username)
         return await db.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
-    if row["is_paid"] and row["subscription_until"] and row["subscription_until"] < datetime.now(timezone.utc).replace(tzinfo=None):
+    if row["is_paid"] and row["subscription_until"] and row["subscription_until"] < now_utc():
         await db.execute("UPDATE users SET is_paid = FALSE, plan = 'free', requests_used = 0, file_mb_used = 0 WHERE user_id = $1", user_id)
         await bot.send_message(user_id, "⚠️ Ваша подписка истекла. Напишите /subscribe чтобы продлить.")
         return await db.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
     if row["is_paid"] and row["period_start"]:
         period_end = row["period_start"] + timedelta(days=30)
-        if datetime.now(timezone.utc).replace(tzinfo=None) > period_end:
-            await db.execute("UPDATE users SET requests_used = 0, file_mb_used = 0, period_start = $1 WHERE user_id = $2", datetime.now(timezone.utc).replace(tzinfo=None), user_id)
+        if now_utc() > period_end:
+            await db.execute("UPDATE users SET requests_used = 0, file_mb_used = 0, period_start = $1 WHERE user_id = $2", now_utc(), user_id)
             return await db.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
     return row
+
 
 async def check_limits(user_id, username, file_mb=0):
     if user_id == ADMIN_ID:
@@ -247,7 +263,7 @@ async def check_limits(user_id, username, file_mb=0):
     row = await get_user(user_id, username)
     plan_key = row["plan"] or "free"
     if not row["is_paid"]:
-        today = datetime.now(timezone.utc).replace(tzinfo=None).date()
+        today = now_utc().date()
         reset_date = row["free_reset_date"] if row["free_reset_date"] else None
         if reset_date != today:
             await db.execute("UPDATE users SET free_used = 0, free_reset_date = $1 WHERE user_id = $2", today, user_id)
@@ -280,6 +296,7 @@ async def check_limits(user_id, username, file_mb=0):
             return False, f"Превышен месячный лимит файлов. Использовано: {used} МБ из {plan['file_mb_total']} МБ."
     return True, None
 
+
 async def increment_usage(user_id, file_mb=0):
     row = await db.fetchrow("SELECT is_paid, free_used FROM users WHERE user_id = $1", user_id)
     if not row["is_paid"]:
@@ -291,9 +308,11 @@ async def increment_usage(user_id, file_mb=0):
             WHERE user_id = $2
         """, file_mb, user_id)
 
+
 def get_system_prompt(user_id):
     role_key = user_roles.get(user_id, "chat")
     return ROLES[role_key]["prompt"]
+
 
 async def download_file(file_id):
     file = await bot.get_file(file_id)
@@ -302,18 +321,20 @@ async def download_file(file_id):
         async with session.get(url) as resp:
             return await resp.read()
 
+
 async def activate_subscription(user_id, plan_key):
     plan = PLANS.get(plan_key, PLANS["basic"])
     row = await db.fetchrow("SELECT subscription_until, is_paid FROM users WHERE user_id = $1", user_id)
-    if row and row["is_paid"] and row["subscription_until"] and row["subscription_until"] > datetime.now(timezone.utc).replace(tzinfo=None):
+    if row and row["is_paid"] and row["subscription_until"] and row["subscription_until"] > now_utc():
         new_until = row["subscription_until"] + timedelta(days=30)
     else:
-        new_until = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=30)
+        new_until = now_utc() + timedelta(days=30)
     await db.execute("""
         UPDATE users SET is_paid = TRUE, subscription_until = $1, plan = $2,
         requests_used = 0, file_mb_used = 0, period_start = $3 WHERE user_id = $4
-    """, new_until, plan_key, datetime.now(timezone.utc).replace(tzinfo=None), user_id)
+    """, new_until, plan_key, now_utc(), user_id)
     return new_until
+
 
 async def parse_site(url):
     try:
@@ -323,6 +344,7 @@ async def parse_site(url):
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
             async with session.get(url, headers=headers, proxy=PROXY_URL, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status != 200:
+                    print(f"[parse_site] {url} вернул {resp.status}")
                     return []
                 html = await resp.text()
         soup = BeautifulSoup(html, 'html.parser')
@@ -365,8 +387,9 @@ async def parse_site(url):
                 unique.append(a)
         return unique[:10]
     except Exception as e:
-        print(f"Parse error {url}: {e}")
+        print(f"[parse_site] Ошибка {url}: {e}")
         return []
+
 
 async def get_article_text(url):
     try:
@@ -375,6 +398,7 @@ async def get_article_text(url):
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
             async with session.get(url, headers=headers, proxy=PROXY_URL, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status != 200:
+                    print(f"[get_article_text] {url} вернул {resp.status}")
                     return None
                 html = await resp.text()
         soup = BeautifulSoup(html, 'html.parser')
@@ -386,8 +410,9 @@ async def get_article_text(url):
                 return block.get_text(separator=' ', strip=True)[:3000]
         return soup.get_text(separator=' ', strip=True)[:3000]
     except Exception as e:
-        print(f"Article error {url}: {e}")
+        print(f"[get_article_text] Ошибка {url}: {e}")
         return None
+
 
 async def prepare_draft(title, text, link):
     prompt = (
@@ -399,7 +424,7 @@ async def prepare_draft(title, text, link):
         f"Текст: {text[:1500]}"
     )
     response = await claude_create_with_retry(
-        model="claude-sonnet-4-5-20250929",
+        model="claude-sonnet-4-5",
         max_tokens=500,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -407,6 +432,7 @@ async def prepare_draft(title, text, link):
     post_text = re.sub(r'\*\*?(.*?)\*\*?', r'\1', post_text)
     post_text = re.sub(r'^#{1,6}\s', '', post_text, flags=re.MULTILINE)
     return post_text
+
 
 async def save_draft(title, draft_text, link):
     h = hashlib.md5(link.encode()).hexdigest()
@@ -418,6 +444,7 @@ async def save_draft(title, draft_text, link):
     """, h, title, draft_text, link)
     return h
 
+
 async def send_for_approval(draft_id, draft_text, link):
     preview = f"📝 Черновик на утверждение:\n\n{draft_text}\n\nИсточник: {link}"
     builder = InlineKeyboardBuilder()
@@ -427,7 +454,9 @@ async def send_for_approval(draft_id, draft_text, link):
     builder.adjust(3)
     await bot.send_message(EDITORIAL_CHAT_ID, preview, reply_markup=builder.as_markup())
 
+
 async def collect_candidates():
+    # Убран journal.tinkoff.ru — блокирует прокси (403)
     sites = [
         "https://www.rbc.ru/economics/",
         "https://www.kommersant.ru/finance",
@@ -437,7 +466,6 @@ async def collect_candidates():
         "https://www.dp.ru/a/economics/",
         "https://secretmag.ru/news/",
         "https://www.banki.ru/news/",
-        "https://journal.tinkoff.ru/news/",
         "https://www.klerk.ru/news/",
         "https://www.audit-it.ru/news/",
         "https://www.garant.ru/news/",
@@ -454,8 +482,10 @@ async def collect_candidates():
                 if not exists:
                     candidates.append(article)
         except Exception as e:
-            print(f"Collect error {site_url}: {e}")
+            print(f"[collect_candidates] Ошибка {site_url}: {e}")
+    print(f"[collect_candidates] Найдено кандидатов: {len(candidates)}")
     return candidates
+
 
 async def pick_top_candidates(candidates, n=3):
     if not candidates:
@@ -471,7 +501,7 @@ async def pick_top_candidates(candidates, n=3):
         f"{titles}"
     )
     response = await claude_create_with_retry(
-        model="claude-sonnet-4-5-20250929",
+        model="claude-sonnet-4-5",
         max_tokens=20,
         messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}]
     )
@@ -482,62 +512,91 @@ async def pick_top_candidates(candidates, n=3):
     except:
         return candidates[:n]
 
+
 async def fetch_and_post():
-    candidates = await collect_candidates()
-    if not candidates:
-        print("Нет новых кандидатов")
-        return
-    top3 = await pick_top_candidates(candidates, n=3)
-    if not top3:
-        return
-    for candidate in top3:
-        text = await get_article_text(candidate['link'])
-        if not text or len(text) < 100:
-            continue
-        draft = await prepare_draft(candidate['title'], text, candidate['link'])
-        if not draft:
-            continue
-        draft_id = await save_draft(candidate['title'], draft, candidate['link'])
-        await send_for_approval(draft_id, draft, candidate['link'])
-        await asyncio.sleep(5)  # пауза между запросами к Claude чтобы не упасть в rate limit
+    print("[fetch_and_post] Запуск сбора новостей...")
+    try:
+        candidates = await collect_candidates()
+        if not candidates:
+            print("[fetch_and_post] Нет новых кандидатов")
+            return
+        top3 = await pick_top_candidates(candidates, n=3)
+        if not top3:
+            print("[fetch_and_post] Топ-3 не выбраны")
+            return
+        for candidate in top3:
+            try:
+                text = await get_article_text(candidate['link'])
+                if not text or len(text) < 100:
+                    print(f"[fetch_and_post] Пропуск — мало текста: {candidate['link']}")
+                    continue
+                draft = await prepare_draft(candidate['title'], text, candidate['link'])
+                if not draft:
+                    continue
+                draft_id = await save_draft(candidate['title'], draft, candidate['link'])
+                await send_for_approval(draft_id, draft, candidate['link'])
+                print(f"[fetch_and_post] Черновик отправлен: {candidate['title'][:60]}")
+                await asyncio.sleep(5)
+            except Exception as e:
+                print(f"[fetch_and_post] Ошибка для {candidate['link']}: {e}")
+    except Exception as e:
+        print(f"[fetch_and_post] КРИТИЧЕСКАЯ ОШИБКА: {e}")
+
 
 async def process_publish_queue():
     while True:
-        if publish_queue:
-            draft_id = publish_queue.pop(0)
-            row = await db.fetchrow("SELECT * FROM drafts WHERE hash = $1", draft_id)
-            if row and row["status"] == "queued":
-                post_text = row["draft_text"]
-                post_text += f'\n\n<a href="{row["link"]}">Читать источник</a>'
-                post_text += f"\n@probiznav"
-                try:
-                    await bot.send_message(CHANNEL_ID, post_text, parse_mode="HTML", disable_web_page_preview=True)
-                    await db.execute("UPDATE drafts SET status = 'published' WHERE hash = $1", draft_id)
-                except Exception as e:
-                    print(f"Ошибка публикации: {e}")
+        try:
             if publish_queue:
-                await asyncio.sleep(20 * 60)
+                draft_id = publish_queue.pop(0)
+                row = await db.fetchrow("SELECT * FROM drafts WHERE hash = $1", draft_id)
+                if row and row["status"] == "queued":
+                    post_text = row["draft_text"]
+                    post_text += f'\n\n<a href="{row["link"]}">Читать источник</a>'
+                    post_text += f"\n@probiznav"
+                    try:
+                        await bot.send_message(CHANNEL_ID, post_text, parse_mode="HTML", disable_web_page_preview=True)
+                        await db.execute("UPDATE drafts SET status = 'published' WHERE hash = $1", draft_id)
+                        print(f"[queue] Опубликовано: {draft_id}")
+                    except Exception as e:
+                        print(f"[queue] Ошибка публикации: {e}")
+                if publish_queue:
+                    await asyncio.sleep(20 * 60)
+        except Exception as e:
+            print(f"[process_publish_queue] ОШИБКА: {e}")
         await asyncio.sleep(30)
+
 
 async def scheduler():
     import random
+    print("[scheduler] Запущен")
     last_collect = 0
     while True:
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        msk_hour = (now.hour + 3) % 24
-        current_time = now.timestamp()
-        if current_time - last_collect > 1800:
-            await collect_candidates()
-            last_collect = current_time
-        if 8 <= msk_hour < 24:
-            wait_minutes = random.randint(45, 75)
-            await asyncio.sleep(wait_minutes * 60)
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
+        try:
+            now = now_utc()
             msk_hour = (now.hour + 3) % 24
+            current_time = now.timestamp()
+
+            if current_time - last_collect > 1800:
+                await collect_candidates()
+                last_collect = current_time
+
             if 8 <= msk_hour < 24:
-                await fetch_and_post()
-        else:
-            await asyncio.sleep(600)
+                wait_minutes = random.randint(45, 75)
+                print(f"[scheduler] МСК {msk_hour}:xx — ждём {wait_minutes} мин. до следующего запуска")
+                await asyncio.sleep(wait_minutes * 60)
+                # Перепроверяем время после ожидания
+                now = now_utc()
+                msk_hour = (now.hour + 3) % 24
+                if 8 <= msk_hour < 24:
+                    await fetch_and_post()
+            else:
+                print(f"[scheduler] МСК {msk_hour}:xx — ночное время, ждём")
+                await asyncio.sleep(600)
+
+        except Exception as e:
+            print(f"[scheduler] ОШИБКА: {e}")
+            await asyncio.sleep(300)
+
 
 @dp.message(F.text == "/start")
 async def start(message: Message):
@@ -547,9 +606,11 @@ async def start(message: Message):
     builder.adjust(1)
     await message.answer(WELCOME_TEXT.format(limit=FREE_LIMIT), reply_markup=builder.as_markup())
 
+
 @dp.message(F.text == "/help")
 async def help_cmd(message: Message):
     await message.answer(HELP_TEXT.format(history=MAX_HISTORY, limit=FREE_LIMIT))
+
 
 @dp.message(F.text == "/role")
 async def role_cmd(message: Message):
@@ -568,6 +629,7 @@ async def role_cmd(message: Message):
         reply_markup=builder.as_markup()
     )
 
+
 @dp.callback_query(F.data.startswith("role_"))
 async def set_role(callback: CallbackQuery):
     uid = callback.from_user.id
@@ -578,6 +640,7 @@ async def set_role(callback: CallbackQuery):
     conversations.pop(uid, None)
     await callback.message.edit_text(f"✅ Режим изменён на: {ROLES[role_key]['name']}\n\nИстория диалога очищена. Можешь начинать!")
     await callback.answer()
+
 
 @dp.message(F.text.in_({"👤 Мой профиль", "/profile"}))
 async def profile(message: Message):
@@ -612,15 +675,16 @@ async def profile(message: Message):
         f"📊 Всего запросов за всё время: {row['total_requests']}"
     )
 
+
 async def message_answer_safe(callback, text):
     try:
         await callback.message.edit_text(text)
     except:
         await callback.message.answer(text)
 
+
 @dp.message(F.text == "/subscribe")
 async def subscribe(message: Message):
-    uid = message.from_user.id
     await message.answer(
         "💰 Выбери тариф:\n\n"
         "🔹 Базовый — 299 руб./мес.(150⭐️) \n200 запросов + 50 МБ файлов\n\n"
@@ -630,10 +694,11 @@ async def subscribe(message: Message):
     builder = InlineKeyboardBuilder()
     for key, plan in PLANS.items():
         builder.button(text=f"{plan['name']} — {plan['price']}", callback_data=f"buy_{key}")
-    builder.button(text="🤝 Тестовый доступ", callback_data=f"test_{uid}")
+    builder.button(text="🤝 Тестовый доступ", callback_data=f"test_{message.from_user.id}")
     builder.adjust(1)
     await message.answer("👇 Выбери тариф:", reply_markup=builder.as_markup())
     await message.answer("💬 Если есть вопросы по тарифам — обращайтесь к администратору: @polyakovkonst")
+
 
 @dp.callback_query(F.data.startswith("test_"))
 async def test_access(callback: CallbackQuery):
@@ -656,6 +721,7 @@ async def test_access(callback: CallbackQuery):
     )
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("buy_"))
 async def buy_plan(callback: CallbackQuery):
     plan_key = callback.data.split("_")[1]
@@ -672,9 +738,11 @@ async def buy_plan(callback: CallbackQuery):
         prices=[LabeledPrice(label=plan['name'], amount=plan['stars'])]
     )
 
+
 @dp.pre_checkout_query()
 async def pre_checkout(query: PreCheckoutQuery):
     await query.answer(ok=True)
+
 
 @dp.message(F.successful_payment)
 async def successful_payment(message: Message):
@@ -701,6 +769,7 @@ async def successful_payment(message: Message):
         f"🆔 ID: {uid}\n"
         f"📦 Тариф: {plan['name']} — {plan['stars']} ⭐️"
     )
+
 
 @dp.callback_query(F.data.startswith("approve_"))
 async def approve(callback: CallbackQuery):
@@ -730,6 +799,7 @@ async def approve(callback: CallbackQuery):
     await callback.message.edit_text(callback.message.text + f"\n\n✅ Одобрено: {plan['name']} до {until_str}")
     await callback.answer("Подписка активирована!")
 
+
 @dp.callback_query(F.data.startswith("reject_"))
 async def reject(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
@@ -738,6 +808,7 @@ async def reject(callback: CallbackQuery):
     await bot.send_message(uid, "❌ Заявка отклонена. Напишите администратору @polyakovkonst для уточнения.")
     await callback.message.edit_text(callback.message.text + "\n\n❌ Отклонено")
     await callback.answer("Заявка отклонена")
+
 
 @dp.callback_query(F.data.startswith("pub_"))
 async def publish_draft(callback: CallbackQuery):
@@ -764,6 +835,7 @@ async def publish_draft(callback: CallbackQuery):
         await callback.message.edit_text(callback.message.text + "\n\n✅ Опубликовано!")
         await callback.answer("Опубликовано в канал!")
 
+
 @dp.callback_query(F.data.startswith("edit_"))
 async def edit_draft(callback: CallbackQuery):
     draft_id = callback.data.split("_", 1)[1]
@@ -778,12 +850,14 @@ async def edit_draft(callback: CallbackQuery):
     )
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("skip_"))
 async def skip_draft(callback: CallbackQuery):
     draft_id = callback.data.split("_", 1)[1]
     await db.execute("UPDATE drafts SET status = 'skipped' WHERE hash = $1", draft_id)
     await callback.message.edit_text(callback.message.text + "\n\n❌ Пропущено")
     await callback.answer("Черновик пропущен")
+
 
 @dp.message(F.reply_to_message & F.chat.id == EDITORIAL_CHAT_ID)
 async def receive_edited_draft(message: Message):
@@ -805,6 +879,7 @@ async def receive_edited_draft(message: Message):
         reply_markup=builder.as_markup()
     )
     del pending_edits[uid]
+
 
 @dp.message(F.text == "/stats")
 async def stats(message: Message):
@@ -831,12 +906,14 @@ async def stats(message: Message):
         f"🏆 Топ-5 пользователей:\n{top_text}"
     )
 
+
 @dp.message(F.text == "/clear")
 async def clear(message: Message):
     uid = message.from_user.id
     conversations.pop(uid, None)
     await db.execute("DELETE FROM conversations WHERE user_id = $1", uid)
     await message.answer("🗑 История диалога очищена!\n\nЭто полезно когда хочешь начать новую тему с чистого листа.")
+
 
 @dp.message(F.text == "/support")
 async def support(message: Message):
@@ -846,6 +923,7 @@ async def support(message: Message):
         "📄 Публичная оферта: https://telegra.ph/Publichnaya-oferta-River-first-bot-04-27"
     )
 
+
 @dp.message(F.text == "/postnow")
 async def post_now(message: Message):
     if message.from_user.id != ADMIN_ID:
@@ -854,7 +932,8 @@ async def post_now(message: Message):
     await fetch_and_post()
     await message.answer("✅ Черновики отправлены в редакторский чат!")
 
-@dp.message(F.text.startswith("/post"))
+
+@dp.message(F.text.startswith("/post "))
 async def manual_post(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
@@ -893,12 +972,10 @@ async def handle_with_access(message: Message, content, file_mb=0):
             "SELECT role, content FROM conversations WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2",
             uid, MAX_HISTORY * 2
         )
-        # ФИX: восстанавливаем content из JSON если это был список (фото/документ)
         conversations[uid] = [
             {"role": r["role"], "content": str_to_content(r["content"])}
             for r in reversed(rows)
         ]
-    # ФИX: сохраняем в БД через json.dumps если content — список
     content_str = content_to_str(content)
     await db.execute(
         "INSERT INTO conversations (user_id, role, content) VALUES ($1, $2, $3)",
@@ -927,7 +1004,7 @@ async def handle_photo(message: Message):
     if not allowed:
         return
     response = await claude_create_with_retry(
-        model="claude-sonnet-4-5-20250929",
+        model="claude-sonnet-4-5",
         max_tokens=1500,
         system=get_system_prompt(uid),
         messages=conversations[uid]
@@ -988,7 +1065,7 @@ async def handle_document(message: Message):
     if not allowed:
         return
     response = await claude_create_with_retry(
-        model="claude-sonnet-4-5-20250929",
+        model="claude-sonnet-4-5",
         max_tokens=1500,
         system=get_system_prompt(uid),
         messages=conversations[uid]
@@ -1009,7 +1086,7 @@ async def handle(message: Message):
     if not allowed:
         return
     response = await claude_create_with_retry(
-        model="claude-sonnet-4-5-20250929",
+        model="claude-sonnet-4-5",
         max_tokens=1500,
         system=get_system_prompt(uid),
         messages=conversations[uid]
@@ -1024,6 +1101,7 @@ async def handle(message: Message):
 
 async def main():
     await init_db()
+    await test_proxy()
     asyncio.create_task(scheduler())
     asyncio.create_task(process_publish_queue())
     await dp.start_polling(bot)
