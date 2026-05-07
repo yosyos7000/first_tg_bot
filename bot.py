@@ -6,6 +6,7 @@ import asyncpg
 import aiohttp
 import base64
 import hashlib
+import feedparser  # pip install feedparser
 from datetime import datetime, timedelta, timezone
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery
@@ -25,6 +26,11 @@ CHANNEL_BONUS_LIMIT = 30
 MAX_HISTORY = 10
 CHANNEL_ID = "@probiznav"
 EDITORIAL_CHAT_ID = -5220322973
+
+# ─── RSS.app Bundle URL ───────────────────────────────────────────────────────
+# Один URL объединяет все ваши источники: ФНС, Гарант, Эксперт, Клерк и др.
+RSS_BUNDLE_URL = "https://rss.app/feeds/_xW1E07b52umq1kVw.xml"
+# ─────────────────────────────────────────────────────────────────────────────
 
 PLANS = {
     "basic":    {"name": "Базовый",   "price": "150 ⭐️/мес.",  "stars": 150,  "requests": 200,  "file_mb_total": 50,  "file_mb_single": 10},
@@ -97,15 +103,11 @@ HELP_TEXT = """📖 Как пользоваться ботом
 — Про: 350 ⭐️ — безлимит запросов + 500 МБ файлов"""
 
 
-# ─── Утилита: разбить длинный текст на части по 4096 символов ────────────────
-
 def now_utc() -> datetime:
-    """Возвращает текущее время UTC без tzinfo (для совместимости с БД)."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 async def claude_create_with_retry(max_retries=3, **kwargs):
-    """Вызывает Claude API с повторными попытками при перегрузке (529)."""
     for attempt in range(max_retries):
         try:
             return ai.messages.create(**kwargs)
@@ -145,8 +147,6 @@ async def send_long_message(message: Message, text: str, **kwargs):
             await asyncio.sleep(0.3)
 
 
-# ─── Утилита: сериализация/десериализация контента для БД ────────────────────
-
 def content_to_str(content) -> str:
     if isinstance(content, str):
         return content
@@ -162,8 +162,6 @@ def str_to_content(s: str):
         pass
     return s
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 
 async def init_db():
     global db
@@ -219,7 +217,6 @@ async def init_db():
 
 
 async def test_proxy():
-    """Проверяет работу прокси при старте."""
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
@@ -336,62 +333,61 @@ async def activate_subscription(user_id, plan_key):
     return new_until
 
 
-async def parse_site(url):
+# ─── НОВАЯ ФУНКЦИЯ: читаем новости из RSS.app Bundle ─────────────────────────
+
+async def fetch_rss_candidates():
+    """
+    Читает свежие новости из RSS.app Bundle.
+    Один запрос вместо 13 — никаких 403/404.
+    """
+    candidates = []
     try:
-        from bs4 import BeautifulSoup
-        from urllib.parse import urljoin, urlparse
         async with aiohttp.ClientSession() as session:
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-            async with session.get(url, headers=headers, proxy=PROXY_URL, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.get(
+                RSS_BUNDLE_URL,
+                timeout=aiohttp.ClientTimeout(total=20)
+            ) as resp:
                 if resp.status != 200:
-                    print(f"[parse_site] {url} вернул {resp.status}")
+                    print(f"[rss] Bundle вернул {resp.status}")
                     return []
-                html = await resp.text()
-        soup = BeautifulSoup(html, 'html.parser')
-        for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside', 'advertisement']):
-            tag.decompose()
-        stop_words = [
-            'реклама', 'advert', 'banner', 'promo', 'sponsor', 'партнер',
-            'подписка', 'subscribe', 'login', 'register', 'вакансии', 'jobs',
-            'about', 'contact', 'policy', 'terms', 'cookie', 'help',
-            'теги', 'tags', 'category', 'author', 'profile', 'поиск',
-            'facebook', 'twitter', 'vk.com', 'instagram', 't.me',
-        ]
-        articles = []
-        for a in soup.find_all('a', href=True):
-            title = a.get_text(strip=True)
-            href = a['href']
-            if len(title) < 40 or len(title) > 200:
+                content = await resp.text()
+
+        feed = feedparser.parse(content)
+        total = len(feed.entries)
+        print(f"[rss] Получено статей из Bundle: {total}")
+
+        for entry in feed.entries:
+            title = entry.get("title", "").strip()
+            link  = entry.get("link", "").strip()
+
+            # Пропускаем пустые
+            if not title or not link:
                 continue
-            title_lower = title.lower()
-            href_lower = href.lower()
-            skip = False
-            for word in stop_words:
-                if word in title_lower or word in href_lower:
-                    skip = True
-                    break
-            if skip:
+
+            # Фильтр рекламных ссылок
+            ad_patterns = ['redirect.php', 'erid=', '/go/', 'ad.adriver', 'utm_source=ad']
+            if any(p in link for p in ad_patterns):
                 continue
-            if not href.startswith('http'):
-                href = urljoin(url, href)
-            base_domain = urlparse(url).netloc
-            link_domain = urlparse(href).netloc
-            if base_domain not in link_domain and link_domain not in base_domain:
-                continue
-            articles.append({"title": title, "link": href})
-        seen = set()
-        unique = []
-        for a in articles:
-            if a['link'] not in seen:
-                seen.add(a['link'])
-                unique.append(a)
-        return unique[:10]
+
+            # Проверяем — не публиковали ли уже
+            h = hashlib.md5(link.encode()).hexdigest()
+            exists = await db.fetchval(
+                "SELECT hash FROM posted_links WHERE hash = $1", h
+            )
+            if not exists:
+                candidates.append({"title": title, "link": link})
+
     except Exception as e:
-        print(f"[parse_site] Ошибка {url}: {e}")
-        return []
+        print(f"[rss] Ошибка чтения Bundle: {e}")
+
+    print(f"[rss] Новых кандидатов после фильтрации: {len(candidates)}")
+    return candidates
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 async def get_article_text(url):
+    """Читает полный текст статьи по ссылке из RSS."""
     try:
         from bs4 import BeautifulSoup
         async with aiohttp.ClientSession() as session:
@@ -454,38 +450,6 @@ async def send_for_approval(draft_id, draft_text, link):
     await bot.send_message(EDITORIAL_CHAT_ID, preview, reply_markup=builder.as_markup())
 
 
-async def collect_candidates():
-    # Убран journal.tinkoff.ru — блокирует прокси (403)
-    sites = [
-        "https://www.rbc.ru/economics/",
-        "https://www.kommersant.ru/finance",
-        "https://www.vedomosti.ru/economics",
-        "https://www.forbes.ru/finansy",
-        "https://expert.ru/expert/",
-        "https://www.dp.ru/a/economics/",
-        "https://secretmag.ru/news/",
-        "https://www.banki.ru/news/",
-        "https://www.klerk.ru/news/",
-        "https://www.audit-it.ru/news/",
-        "https://www.garant.ru/news/",
-        "https://corpmsp.ru/press-centr/news/",
-        "https://deloros.ru/news/",
-    ]
-    candidates = []
-    for site_url in sites:
-        try:
-            articles = await parse_site(site_url)
-            for article in articles[:3]:
-                h = hashlib.md5(article['link'].encode()).hexdigest()
-                exists = await db.fetchval("SELECT hash FROM posted_links WHERE hash = $1", h)
-                if not exists:
-                    candidates.append(article)
-        except Exception as e:
-            print(f"[collect_candidates] Ошибка {site_url}: {e}")
-    print(f"[collect_candidates] Найдено кандидатов: {len(candidates)}")
-    return candidates
-
-
 async def pick_top_candidates(candidates, n=3):
     if not candidates:
         return []
@@ -513,16 +477,24 @@ async def pick_top_candidates(candidates, n=3):
 
 
 async def fetch_and_post():
-    print("[fetch_and_post] Запуск сбора новостей...")
+    """
+    Главный цикл: читаем RSS → выбираем топ-3 → пишем черновики → отправляем на утверждение.
+    Теперь использует RSS.app вместо прямого парсинга сайтов.
+    """
+    print("[fetch_and_post] Запуск сбора новостей через RSS.app...")
     try:
-        candidates = await collect_candidates()
+        # ← ИЗМЕНЕНИЕ: используем RSS вместо collect_candidates()
+        candidates = await fetch_rss_candidates()
+
         if not candidates:
             print("[fetch_and_post] Нет новых кандидатов")
             return
+
         top3 = await pick_top_candidates(candidates, n=3)
         if not top3:
             print("[fetch_and_post] Топ-3 не выбраны")
             return
+
         for candidate in top3:
             try:
                 text = await get_article_text(candidate['link'])
@@ -565,23 +537,23 @@ async def process_publish_queue():
 
 async def scheduler():
     import random
-    print("[scheduler] Запущен")
-    last_collect = 0
+    print("[scheduler] Запущен — использует RSS.app Bundle")
+    last_fetch = 0
     while True:
         try:
             now = now_utc()
             msk_hour = (now.hour + 3) % 24
             current_time = now.timestamp()
 
-            if current_time - last_collect > 1800:
-                await collect_candidates()
-                last_collect = current_time
+            # Предварительный сбор каждые 30 минут (только RSS — быстро и дёшево)
+            if current_time - last_fetch > 1800:
+                await fetch_rss_candidates()
+                last_fetch = current_time
 
             if 8 <= msk_hour < 24:
                 wait_minutes = random.randint(45, 75)
                 print(f"[scheduler] МСК {msk_hour}:xx — ждём {wait_minutes} мин. до следующего запуска")
                 await asyncio.sleep(wait_minutes * 60)
-                # Перепроверяем время после ожидания
                 now = now_utc()
                 msk_hour = (now.hour + 3) % 24
                 if 8 <= msk_hour < 24:
@@ -594,6 +566,8 @@ async def scheduler():
             print(f"[scheduler] ОШИБКА: {e}")
             await asyncio.sleep(300)
 
+
+# ─── Все обработчики Telegram (без изменений) ─────────────────────────────────
 
 @dp.message(F.text == "/start")
 async def start(message: Message):
@@ -923,7 +897,7 @@ async def support(message: Message):
 async def post_now(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
-    await message.answer("🔄 Запускаю публикацию новостей...")
+    await message.answer("🔄 Запускаю публикацию новостей через RSS.app...")
     await fetch_and_post()
     await message.answer("✅ Черновики отправлены в редакторский чат!")
 
