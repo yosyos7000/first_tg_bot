@@ -6,7 +6,7 @@ import asyncpg
 import aiohttp
 import base64
 import hashlib
-import feedparser  # pip install feedparser
+import xml.etree.ElementTree as ET  # встроенный модуль, не нужно устанавливать
 from datetime import datetime, timedelta, timezone
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery
@@ -338,7 +338,7 @@ async def activate_subscription(user_id, plan_key):
 async def fetch_rss_candidates():
     """
     Читает свежие новости из RSS.app Bundle.
-    Один запрос вместо 13 — никаких 403/404.
+    Использует встроенный xml.etree — никаких доп. зависимостей.
     """
     candidates = []
     try:
@@ -352,15 +352,26 @@ async def fetch_rss_candidates():
                     return []
                 content = await resp.text()
 
-        feed = feedparser.parse(content)
-        total = len(feed.entries)
-        print(f"[rss] Получено статей из Bundle: {total}")
+        root = ET.fromstring(content)
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        items = root.findall(".//item")  # RSS 2.0
+        if not items:
+            items = root.findall(".//atom:entry", ns)  # Atom fallback
 
-        for entry in feed.entries:
-            title = entry.get("title", "").strip()
-            link  = entry.get("link", "").strip()
+        print(f"[rss] Получено статей из Bundle: {len(items)}")
 
-            # Пропускаем пустые
+        for item in items:
+            # Заголовок
+            title_el = item.find("title")
+            title = (title_el.text or "").strip() if title_el is not None else ""
+
+            # Ссылка (RSS 2.0 — <link>, Atom — <link href="...">)
+            link_el = item.find("link")
+            if link_el is not None:
+                link = (link_el.text or link_el.get("href", "")).strip()
+            else:
+                link = ""
+
             if not title or not link:
                 continue
 
